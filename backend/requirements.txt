@@ -1,0 +1,11 @@
+# DEPRECATED — This file is kept only as a redirect.
+# Use requirements-core.txt (API) + requirements-audio.txt (full pipeline).
+# The old 180-package dump was from the Emergent build environment and included
+# openai, google-ai, litellm, stripe, boto3, tensorflow — none of which this app uses.
+#
+# Install:
+#   pip install -r requirements-core.txt                    # API only
+#   pip install -r requirements-core.txt -r requirements-audio.txt  # Full stack
+
+-r requirements-core.txt
+-r requirements-audio.txt

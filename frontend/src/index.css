@@ -1,0 +1,127 @@
+:root {
+  --bg-primary: #000000;
+  --bg-surface: #0a0a0a;
+  --bg-surface-2: #111111;
+  --border-dim: rgba(255, 255, 255, 0.08);
+  --border-active: #00ff88;
+  --text-primary: #ffffff;
+  --text-secondary: rgba(255, 255, 255, 0.45);
+  --text-terminal: rgba(255, 255, 255, 0.75);
+  --neon: #00ff88;
+  --neon-dim: rgba(0, 255, 136, 0.15);
+  --neon-glow: 0 0 12px rgba(0, 255, 136, 0.6);
+  --danger: #ff3b3b;
+  --warning: #ffaa00;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 400;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-family: inherit;
+  border-radius: 0;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: rgba(255,255,255,0.18);
+  outline: none;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  background: var(--neon);
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+  box-shadow: var(--neon-glow);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  background: var(--neon);
+  border: none;
+  border-radius: 0;
+  cursor: pointer;
+  box-shadow: var(--neon-glow);
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  background: rgba(255,255,255,0.18);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  background: rgba(255,255,255,0.18);
+}
+
+input[type="range"]::-moz-range-progress {
+  height: 4px;
+  background: var(--neon);
+  box-shadow: 0 0 6px rgba(0,255,136,0.5);
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-surface);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes barPulse {
+  from { transform: scaleY(0.4); }
+  to   { transform: scaleY(1.0); }
+}
+
+@keyframes telemetryIn {
+  from { opacity: 0; transform: translateX(-6px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes scanLine {
+  0%   { transform: translateY(0); opacity: 0.6; }
+  100% { transform: translateY(120px); opacity: 0; }
+}
