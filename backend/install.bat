@@ -36,15 +36,16 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo Installing basic-pitch (requires tensorflow-intel on Windows)...
-pip install tensorflow-intel>=2.14.0,<2.15.1
+echo Installing basic-pitch (ONNX backend on Windows/Python 3.11)...
+echo Installing basic-pitch runtime deps (avoids heavy TensorFlow)...
+pip install onnxruntime "mir_eval>=0.6" "resampy>=0.2.2,<0.4.3" typing-extensions
 if %errorlevel% neq 0 (
-    echo WARNING: tensorflow-intel failed. Transform feature will be stubbed.
+    echo WARNING: basic-pitch deps failed. Transform/MIDI feature will be stubbed.
     goto done
 )
 pip install basic-pitch --no-deps
 if %errorlevel% neq 0 (
-    echo WARNING: basic-pitch failed. Transform feature will be stubbed.
+    echo WARNING: basic-pitch failed. Transform/MIDI feature will be stubbed.
 )
 
 :done
