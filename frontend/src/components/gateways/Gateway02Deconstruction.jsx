@@ -187,6 +187,12 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
     async function triggerTransform() {
       try {
         await apiPost(`/api/projects/${projectId}/transform`, {})
+        // Under StrictMode the effect double-invokes: the first mount's cleanup
+        // sets `cancelled` while this await is in flight. Without this guard the
+        // unmounted mount leaks a setInterval bound to a cancelled closure, which
+        // later clears the live poller on 'complete' and never flips state —
+        // leaving the UI stuck at the last progress stage forever.
+        if (cancelled) return
         startPolling()
       } catch (e) {
         if (!cancelled) {
@@ -197,6 +203,9 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
     }
 
     function startPolling() {
+      // Clear any prior interval before (re)assigning so a double-start can
+      // never leave two intervals racing over the shared pollRef.
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
       pollRef.current = setInterval(async () => {
         try {
           const data = await apiGet(`/api/projects/${projectId}/transform-status`)
