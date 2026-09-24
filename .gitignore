@@ -94,3 +94,4 @@ uploads/
 .pytest_cache/
 .ruff_cache/
 
+backend/mongo.log
