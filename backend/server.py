@@ -77,6 +77,7 @@ from style_engine import (
     build_learned_style_prompt,
 )
 from task_manager import create_bounded_task
+from morph_engine import run_morph_pipeline, MorphPlanError
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -1106,6 +1107,171 @@ async def transform_status(project_id: str):
                 "error": "Transform was interrupted (server restarted). Please run it again."}
     return {"status": status}
 
+# ── Gateway 03: Morph Engine ─────────────────────────────────────────────
+# Deterministic DSP morph of the GW02 instrumental stems (see morph_engine.py).
+# Progress + status + atomic-claim pattern mirrors the transform pipeline above.
+
+class MorphRequest(BaseModel):
+    similarity_target: Optional[int] = 35
+    key_target: Optional[str] = None
+    bpm_target: Optional[float] = None
+
+
+# In-memory progress for in-flight morphs (separate dict from transforms so a
+# morph never masks a transform's progress).
+_MORPH_PROGRESS: Dict[str, Dict[str, Any]] = {}
+
+
+def _set_morph_progress(project_id: str, stage: str, pct: int, detail: str = ""):
+    _MORPH_PROGRESS[project_id] = {
+        "stage": stage, "percent": int(pct), "detail": detail,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _run_morph(project_id: str, stems_dir: str, morph_dir: str, params: dict):
+    """Background task: runs the morph pipeline in a worker thread, writes results to DB."""
+    _set_morph_progress(project_id, "start", 0, "Starting morph")
+    try:
+        loop = asyncio.get_event_loop()
+        morph_result = await loop.run_in_executor(
+            None, run_morph_pipeline, stems_dir, morph_dir, params,
+            lambda stage, pct, detail="": _set_morph_progress(project_id, stage, pct, detail),
+        )
+        if not morph_result.get("success"):
+            raise RuntimeError(morph_result.get("error", "Unknown morph error"))
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {
+                "morph_status": "complete",
+                "morph_error": None,
+                "morph_directory": f"{project_id}_morph",
+                "morph_params": params,
+                "morph_result": morph_result.get("result", {}),
+                "morphed_files": morph_result.get("files", []),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }}
+        )
+        logger.info(f"Morph complete for {project_id}")
+    except Exception as e:
+        logger.error(f"Morph failed for {project_id}: {e}")
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {"morph_status": "failed", "morph_error": str(e),
+                      "updated_at": datetime.now(timezone.utc).isoformat()}}
+        )
+    finally:
+        _MORPH_PROGRESS.pop(project_id, None)
+
+
+@api_router.post("/projects/{project_id}/morph")
+async def morph_beat(project_id: str, body: MorphRequest = MorphRequest()):
+    project = await db.projects.find_one({"id": project_id})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("transform_status") != "complete" or not project.get("stems_directory"):
+        raise HTTPException(status_code=400, detail="Run deconstruction (Gateway 02) first")
+    if body.similarity_target is not None and not (0 <= body.similarity_target <= 79):
+        raise HTTPException(status_code=400, detail="similarity_target must be between 0 and 79")
+
+    stems_dir = UPLOAD_DIR / project["stems_directory"]
+    if not stems_dir.exists():
+        raise HTTPException(status_code=404, detail="Stems directory not found on disk")
+    has_source = (stems_dir / "instrumental.wav").exists() or any(
+        (stems_dir / f"{n}.wav").exists() for n in ["drums", "bass", "other"])
+    if not has_source:
+        raise HTTPException(status_code=404, detail="No instrumental stems found on disk")
+
+    morph_dir = UPLOAD_DIR / f"{project_id}_morph"
+    params = {
+        "similarity_target": body.similarity_target if body.similarity_target is not None else 35,
+        "key_target": body.key_target,
+        "bpm_target": body.bpm_target,
+    }
+
+    # Atomic claim: only the request that flips status -> "processing" starts the
+    # pipeline (StrictMode double-mount safe). Re-morphing a complete project is
+    # allowed — the claim only blocks concurrent runs.
+    claimed = await db.projects.update_one(
+        {"id": project_id, "morph_status": {"$ne": "processing"}},
+        {"$set": {"morph_status": "processing", "morph_error": None,
+                  "morph_params": params,
+                  "updated_at": datetime.now(timezone.utc).isoformat()}}
+    )
+    if claimed.matched_count == 0:
+        return {"status": "processing", "project_id": project_id}
+
+    try:
+        await create_bounded_task(
+            _run_morph(project_id, str(stems_dir), str(morph_dir), params),
+            name=f"morph-{project_id}")
+    except Exception as e:
+        logger.error(f"Failed to start morph task for {project_id}: {e}")
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {"morph_status": "failed", "morph_error": str(e),
+                      "updated_at": datetime.now(timezone.utc).isoformat()}}
+        )
+        raise HTTPException(status_code=500, detail={"error": str(e), "message": "Failed to start morph task"})
+    return {"status": "processing", "project_id": project_id}
+
+
+@api_router.get("/projects/{project_id}/morph-status")
+async def morph_status(project_id: str):
+    project = await db.projects.find_one({"id": project_id})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    status = project.get("morph_status", "pending")
+    if status == "complete":
+        # True Isolation: fully rendered from the DB doc — survives refresh.
+        return {
+            "status": "complete",
+            "success": True,
+            "morph_params": project.get("morph_params", {}),
+            "morph_result": project.get("morph_result", {}),
+            "morphed_files": project.get("morphed_files", []),
+        }
+    if status == "failed":
+        # 200, not 500: a failed morph is a valid status answer (same rationale
+        # as transform-status — a 500 makes the poller retry forever).
+        return {"status": "failed", "success": False,
+                "error": project.get("morph_error", "Unknown error")}
+    if status == "processing":
+        prog = _MORPH_PROGRESS.get(project_id)
+        if prog:
+            return {"status": "processing", "progress": prog}
+        # DB says processing but no task is running in this process — the backend
+        # restarted (or the task died) mid-run. Recover to failed.
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {"morph_status": "failed",
+                      "morph_error": "Morph was interrupted (server restarted). Please run it again.",
+                      "updated_at": datetime.now(timezone.utc).isoformat()}}
+        )
+        return {"status": "failed", "success": False,
+                "error": "Morph was interrupted (server restarted). Please run it again."}
+    return {"status": status}
+
+
+@api_router.get("/projects/{project_id}/morph-preview")
+async def morph_preview(project_id: str):
+    project = await db.projects.find_one({"id": project_id})
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("morph_status") != "complete" or not project.get("morph_directory"):
+        raise HTTPException(status_code=404, detail="No morph available — run the morph first")
+    morph_dir = UPLOAD_DIR / project["morph_directory"]
+    preview_path = None
+    for name in ["instrumental.mp3", "instrumental.wav"]:
+        cand = morph_dir / name
+        if cand.exists():
+            preview_path = cand
+            break
+    if not preview_path:
+        raise HTTPException(status_code=404, detail="Morphed instrumental not found on disk")
+    media_type = "audio/mpeg" if preview_path.suffix.lower() == ".mp3" else "audio/wav"
+    return FileResponse(str(preview_path), media_type=media_type)
+
 # New endpoint to download transformation package
 @api_router.get("/projects/{project_id}/download-stems")
 async def download_stems_package(project_id: str):
@@ -1158,18 +1324,29 @@ async def download_stems_package(project_id: str):
 
 @api_router.get("/projects/{project_id}/download-beat")
 async def download_beat(project_id: str):
-    """The cleared beat = the instrumental (beat without vocals), falling back to the original."""
+    """The cleared beat = the morphed instrumental (GW03), falling back to the
+    deconstructed instrumental (GW02), falling back to the original."""
     project = await db.projects.find_one({"id": project_id})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    stems_dir = UPLOAD_DIR / project['stems_directory'] if project.get('stems_directory') else None
     beat_path = None
-    if stems_dir and stems_dir.exists():
+    # Morph output wins when Gateway 03 completed — doctrine: the Cleared Beat
+    # IS the morph result; GW04/GW05 consumers automatically get it.
+    if project.get("morph_status") == "complete" and project.get("morph_directory"):
+        morph_dir = UPLOAD_DIR / project["morph_directory"]
         for name in ["instrumental.mp3", "instrumental.wav"]:
-            cand = stems_dir / name
+            cand = morph_dir / name
             if cand.exists():
                 beat_path = cand
                 break
+    if not beat_path:
+        stems_dir = UPLOAD_DIR / project['stems_directory'] if project.get('stems_directory') else None
+        if stems_dir and stems_dir.exists():
+            for name in ["instrumental.mp3", "instrumental.wav"]:
+                cand = stems_dir / name
+                if cand.exists():
+                    beat_path = cand
+                    break
     if not beat_path:
         beat_file = project.get("transformed_file") or project.get("original_file")
         if not beat_file:
@@ -1942,7 +2119,11 @@ async def startup_reset_stale_jobs():
         {"voice_clone_status": "processing"},
         {"$set": {"voice_clone_status": "pending", "voice_clone_error": None}},
     )
-    total = r1.modified_count + r2.modified_count
+    r3 = await db.projects.update_many(
+        {"morph_status": "processing"},
+        {"$set": {"morph_status": "pending", "morph_error": None}},
+    )
+    total = r1.modified_count + r2.modified_count + r3.modified_count
     if total:
         logger.info(f"Reset {total} orphaned job(s) to 'pending' on startup")
 
