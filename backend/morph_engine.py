@@ -215,59 +215,79 @@ def _fold_tempo_ratio(r: float) -> float:
     return r
 
 
-def measure_similarity(y_orig, sr_orig, morph_wav: Path) -> dict:
-    """Honest similarity: re-analyze BOTH signals with the same detectors.
+def _detect_bpm(y, sr) -> float:
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    # librosa >=0.10 returns tempo as a 1-element array, not a scalar
+    return round(float(np.squeeze(tempo)), 1)
 
-    Returns the three raw components plus achieved/deviation percentages.
-    The achieved value will not equal the target exactly — the UI shows
-    target vs. achieved and the user re-adjusts (doctrine: preview and
-    re-adjust before committing).
+
+def _chroma_key(y, sr):
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr).mean(axis=1)
+    key_idx = int(np.argmax(chroma))
+    return chroma, key_idx
+
+
+def measure_similarity(y_full_orig, sr_full, morph_full_wav: Path,
+                       y_harm_orig=None, sr_harm=None, y_harm_morph=None) -> dict:
+    """Honest similarity: re-analyze BOTH sides with the same detectors.
+
+    Axes are measured on the signal that actually carries the change:
+      - tempo: full instrumental mix (drums drive the beat tracker)
+      - chroma + key: harmonic submix (bass+other). Drums are deliberately NOT
+        pitch-shifted, and their loud broadband transients dominate the full-mix
+        chroma (measured cos 0.99 on a real track despite bass/other moving
+        G -> C). Measuring the harmonic axis on the harmonic stems keeps the
+        metric honest in both directions.
+
+    The achieved value will not equal the target exactly — the UI shows target
+    vs. achieved and the user re-adjusts (doctrine: preview and re-adjust).
     """
-    orig = analyze_audio(y_orig, sr_orig)
-    y_m, sr_m = librosa.load(str(morph_wav), sr=None, mono=True, duration=60)
-    morphed = analyze_audio(y_m, sr_m)
+    # Tempo axis — full mixes
+    bpm_orig = _detect_bpm(y_full_orig, sr_full)
+    y_m, sr_m = librosa.load(str(morph_full_wav), sr=None, mono=True, duration=60)
+    bpm_morphed = _detect_bpm(y_m, sr_m)
+    if bpm_orig > 0 and bpm_morphed > 0:
+        r = _fold_tempo_ratio(bpm_morphed / bpm_orig)
+        tempo_sim = min(max(1.0 - abs(r - 1.0) / 0.25, 0.0), 1.0)
+    else:
+        tempo_sim = 1.0  # undetectable tempo on either side: don't penalize
 
-    # Chroma cosine (harmonic content)
-    a = np.asarray(orig["chroma_mean"], dtype=np.float64)
-    b = np.asarray(morphed["chroma_mean"], dtype=np.float64)
+    # Chroma + key axes — harmonic submix when available
+    if y_harm_orig is not None and y_harm_morph is not None:
+        c_orig, k_orig = _chroma_key(y_harm_orig, sr_harm)
+        c_morph, k_morph = _chroma_key(y_harm_morph, sr_harm)
+    else:
+        # No pitch-shifted stems (drums-only morph) — harmonics unchanged.
+        c_orig, k_orig = _chroma_key(y_full_orig, sr_full)
+        c_morph, k_morph = c_orig, k_orig
+
+    a = np.asarray(c_orig, dtype=np.float64)
+    b = np.asarray(c_morph, dtype=np.float64)
     denom = float(np.linalg.norm(a) * np.linalg.norm(b))
     chroma_sim = float(np.dot(a, b) / denom) if denom > 0 else 0.0
     chroma_sim = min(max(chroma_sim, 0.0), 1.0)
 
-    # Key distance (circular semitones, max meaningful distance 6)
-    key_dist = min(abs(morphed["key_idx"] - orig["key_idx"]),
-                   12 - abs(morphed["key_idx"] - orig["key_idx"]))
+    key_dist = min(abs(k_morph - k_orig), 12 - abs(k_morph - k_orig))
     key_sim = 1.0 - min(key_dist, 6) / 6.0
-
-    # Tempo distance (folded ratio)
-    if orig["bpm"] > 0 and morphed["bpm"] > 0:
-        r = _fold_tempo_ratio(morphed["bpm"] / orig["bpm"])
-        tempo_sim = min(max(1.0 - abs(r - 1.0) / 0.25, 0.0), 1.0)
-    else:
-        tempo_sim = 1.0  # undetectable tempo on either side: don't penalize
 
     similarity_achieved = round(100 * (W_CHROMA * chroma_sim + W_KEY * key_sim + W_TEMPO * tempo_sim))
     return {
         "similarity_achieved": int(similarity_achieved),
         "deviation_achieved": int(100 - similarity_achieved),
-        "bpm_original": orig["bpm"],
-        "bpm_morphed": morphed["bpm"],
-        "key_original": orig["key_name"],
-        "key_morphed": morphed["key_name"],
+        "bpm_original": bpm_orig,
+        "bpm_morphed": bpm_morphed,
+        "key_original": KEY_NAMES[k_orig],
+        "key_morphed": KEY_NAMES[k_morph],
         "chroma_similarity": round(chroma_sim, 3),
         "key_similarity": round(key_sim, 3),
         "tempo_similarity": round(tempo_sim, 3),
     }
 
 
-def _load_original_instrumental(stems_dir: Path):
-    """Load the pre-morph instrumental for baseline analysis: instrumental.wav
-    if present, else an in-memory sum of the original stems."""
-    inst = stems_dir / "instrumental.wav"
-    if inst.exists():
-        return librosa.load(str(inst), sr=None, mono=True, duration=60)
+def _sum_stems_mono(stems_dir: Path, names, max_seconds: float = 60.0):
+    """In-memory mono sum of the given stems (60s cap to match analysis budget)."""
     tracks, sr = [], None
-    for name in MORPH_STEMS:
+    for name in names:
         p = stems_dir / f"{name}.wav"
         if p.exists():
             data, rate = sf.read(str(p), dtype="float32", always_2d=True)
@@ -279,7 +299,17 @@ def _load_original_instrumental(stems_dir: Path):
     mixed = np.zeros(frames, dtype=np.float32)
     for t in tracks:
         mixed[:t.shape[0]] += t
-    return mixed, sr
+    cap = int(max_seconds * sr)
+    return mixed[:cap], sr
+
+
+def _load_original_instrumental(stems_dir: Path):
+    """Load the pre-morph instrumental for baseline analysis: instrumental.wav
+    if present, else an in-memory sum of the original stems."""
+    inst = stems_dir / "instrumental.wav"
+    if inst.exists():
+        return librosa.load(str(inst), sr=None, mono=True, duration=60)
+    return _sum_stems_mono(stems_dir, MORPH_STEMS)
 
 
 def run_morph_pipeline(stems_dir, morph_dir, params: dict, progress_cb=None) -> dict:
@@ -313,13 +343,23 @@ def run_morph_pipeline(stems_dir, morph_dir, params: dict, progress_cb=None) -> 
         y_orig, sr_orig = _load_original_instrumental(stems_dir)
         if y_orig is None:
             return {"success": False, "error": "No instrumental audio found for baseline analysis"}
-        baseline = analyze_audio(y_orig, sr_orig)
+        bpm_orig = _detect_bpm(y_orig, sr_orig)
+
+        # Key detection on the harmonic stems (bass+other): drums' broadband
+        # transients pollute the full-mix chroma. Falls back to the full mix
+        # when no harmonic stems exist.
+        harm_names = [n for n in ["bass", "other"] if n in source_stems]
+        y_h_orig, sr_h = _sum_stems_mono(stems_dir, harm_names)
+        if y_h_orig is not None:
+            key_idx_orig = int(np.argmax(librosa.feature.chroma_cqt(y=y_h_orig, sr=sr_h).mean(axis=1)))
+        else:
+            key_idx_orig = int(np.argmax(librosa.feature.chroma_cqt(y=y_orig, sr=sr_orig).mean(axis=1)))
 
         try:
             plan = plan_morph(
                 similarity_target=int(params.get("similarity_target", 35)),
-                key_idx_orig=baseline["key_idx"],
-                bpm_orig=baseline["bpm"],
+                key_idx_orig=key_idx_orig,
+                bpm_orig=bpm_orig,
                 key_target=params.get("key_target"),
                 bpm_target=params.get("bpm_target"),
             )
@@ -356,7 +396,8 @@ def run_morph_pipeline(stems_dir, morph_dir, params: dict, progress_cb=None) -> 
                     files.append(f"{name}.mid")
 
         prog("measure", 85, "Measuring achieved similarity")
-        result = measure_similarity(y_orig, sr_orig, inst_wav)
+        y_h_morph, _ = _sum_stems_mono(morph_dir, harm_names)
+        result = measure_similarity(y_orig, sr_orig, inst_wav, y_h_orig, sr_h, y_h_morph)
         result.update({
             "pitch_semitones": plan["pitch_semitones"],
             "tempo_rate": rate,
