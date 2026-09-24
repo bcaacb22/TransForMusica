@@ -3,8 +3,10 @@ import { Toaster } from 'sonner'
 import { GatewayErrorBoundary } from './components/ErrorBoundary'
 import Gateway01Legal from './components/gateways/Gateway01Legal'
 import Gateway02Deconstruction from './components/gateways/Gateway02Deconstruction'
+import Gateway03Morph from './components/gateways/Gateway03Morph'
 import Gateway04LyricRebuild from './components/gateways/Gateway04LyricRebuild'
-import { apiPost, apiGetBlob, triggerDownload } from './lib/apiClient'
+import Gateway05VoiceClone from './components/gateways/Gateway05VoiceClone'
+import { apiPost } from './lib/apiClient'
 import AudioPlayer from './components/AudioPlayer'
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
@@ -16,14 +18,6 @@ const MOCK_FILE = {
   bitrate: '320 KBPS',
   sampleRate: '44.1 KHZ',
   size: '12.4 MB',
-}
-
-const MOCK_GATEWAY_03 = {
-  bpm: 91,
-  key: 'F#m',
-  tempoShift: '+4.6%',
-  similarityAchieved: 35,
-  deviationAchieved: 65,
 }
 
 // ─── Telemetry lines ──────────────────────────────────────────────────────────
@@ -54,15 +48,15 @@ const TELEMETRY = {
     'BUNDLING DAW PACKAGE...',
   ],
   morphing: [
-    'LOADING MIDI STEM DATA...',
     'ANALYZING BEAT SKELETON...',
-    'APPLYING SIMILARITY TARGET: 35%...',
-    'RESHAPING RHYTHM GRID...',
-    'TRANSPOSING KEY SIGNATURE: Am → F#m...',
-    'SHIFTING TEMPO ANCHOR: +4.6%...',
-    'REBUILDING HARMONIC STRUCTURE...',
+    'COMPUTING MORPH PARAMETERS...',
+    'TIME-STRETCHING STEM: DRUMS...',
+    'TIME-STRETCHING STEM: BASS...',
+    'PITCH-SHIFTING HARMONIC LAYERS...',
+    'SCALING MIDI TEMPO & PITCH...',
+    'REMIXING INSTRUMENTAL...',
+    'MEASURING ACHIEVED SIMILARITY...',
     'TRACING ALL MODIFICATIONS TO SOURCE...',
-    'BEAT RECONSTRUCTION FINALIZING...',
   ],
   rebuilding_lyrics: [
     'LOADING PHONETIC STRUCTURE...',
@@ -332,94 +326,6 @@ function GatewayBar({ state }) {
   )
 }
 
-// ─── Similarity scale (used in Gateway 03 mock) ──────────────────────────────
-
-function SimilarityScale({ current, target, violationLine = 80, locked = false }) {
-  return (
-    <div style={{
-      border: `1px solid ${locked ? 'rgba(255,255,255,0.12)' : 'rgba(0,255,136,0.45)'}`,
-      background: locked ? 'transparent' : 'rgba(0,255,136,0.03)',
-      padding: '14px',
-      boxShadow: locked ? 'none' : '0 0 20px rgba(0,255,136,0.08)',
-    }}>
-      <div style={{
-        fontFamily: 'JetBrains Mono', fontSize: '9px', letterSpacing: '0.15em',
-        color: locked ? 'var(--text-secondary)' : 'var(--neon)',
-        marginBottom: '12px',
-      }}>
-        // SIMILARITY — LOCKED
-      </div>
-      <div style={{ position: 'relative', height: '48px', marginBottom: '8px' }}>
-        <div style={{
-          position: 'absolute', top: '22px', left: 0, right: 0,
-          height: '4px', background: 'rgba(255,255,255,0.1)',
-        }} />
-        <div style={{
-          position: 'absolute', top: '22px', left: 0,
-          width: `${violationLine}%`, height: '4px',
-          background: 'rgba(255,255,255,0.22)',
-        }} />
-        <div style={{
-          position: 'absolute', left: `${current}%`, top: '12px',
-          transform: 'translateX(-50%)',
-          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px',
-        }}>
-          <div style={{
-            fontFamily: 'JetBrains Mono', fontSize: '8px',
-            color: 'rgba(255,255,255,0.55)', letterSpacing: '0.05em',
-          }}>SRC</div>
-          <div style={{ width: '2px', height: '24px', background: 'rgba(255,255,255,0.5)' }} />
-        </div>
-        <div style={{
-          position: 'absolute', left: `${violationLine}%`, top: 0,
-          transform: 'translateX(-50%)',
-          display: 'flex', flexDirection: 'column', alignItems: 'center',
-        }}>
-          <div style={{
-            fontFamily: 'JetBrains Mono', fontSize: '8px',
-            color: 'var(--danger)', letterSpacing: '0.05em',
-          }}>{violationLine}%</div>
-          <div style={{ width: '1px', height: '48px', background: 'var(--danger)', opacity: 0.8 }} />
-        </div>
-      </div>
-      <div style={{
-        display: 'flex', justifyContent: 'space-between',
-        fontFamily: 'JetBrains Mono', fontSize: '10px',
-      }}>
-        <span style={{ color: 'var(--text-secondary)' }}>
-          SOURCE <span style={{ color: '#fff' }}>{current}%</span>
-        </span>
-        <span style={{ color: 'var(--text-secondary)' }}>
-          TARGET <span style={{ color: 'var(--neon)' }}>{target}%</span>
-        </span>
-        <span style={{ color: 'var(--text-secondary)' }}>
-          LINE <span style={{ color: 'var(--danger)' }}>{violationLine}%</span>
-        </span>
-      </div>
-    </div>
-  )
-}
-
-// ─── Metric cell ──────────────────────────────────────────────────────────────
-
-function MetricCell({ label, value, highlight }) {
-  return (
-    <div style={{
-      padding: '10px 12px',
-      border: `1px solid ${highlight ? 'rgba(0,255,136,0.3)' : 'rgba(255,255,255,0.08)'}`,
-      background: highlight ? 'rgba(0,255,136,0.05)' : 'transparent',
-    }}>
-      <div style={{
-        fontFamily: 'JetBrains Mono', fontSize: '9px',
-        color: 'var(--text-secondary)', marginBottom: '4px', letterSpacing: '0.1em',
-      }}>{label}</div>
-      <div style={{
-        fontFamily: 'JetBrains Mono', fontSize: '14px',
-        color: highlight ? 'var(--neon)' : 'var(--text-primary)', fontWeight: 500,
-      }}>{value}</div>
-    </div>
-  )
-}
 
 // ─── Button components ────────────────────────────────────────────────────────
 
@@ -430,17 +336,6 @@ function BtnPrimary({ children, onClick, disabled }) {
       fontFamily: 'JetBrains Mono', fontWeight: 500, fontSize: '12px',
       letterSpacing: '0.1em', padding: '12px 20px', border: 'none',
       boxShadow: disabled ? 'none' : 'var(--neon-glow)', transition: 'opacity 0.15s',
-    }}>{children}</button>
-  )
-}
-
-function BtnHollow({ children, onClick, disabled }) {
-  return (
-    <button onClick={onClick} disabled={disabled} style={{
-      background: 'transparent', color: 'var(--neon)',
-      fontFamily: 'JetBrains Mono', fontWeight: 400, fontSize: '11px',
-      letterSpacing: '0.1em', padding: '7px 13px',
-      border: '1px solid var(--neon)', transition: 'opacity 0.15s',
     }}>{children}</button>
   )
 }
@@ -482,72 +377,6 @@ function ErrorBanner({ error, onDismiss }) {
         color: 'rgba(255,255,255,0.4)', background: 'transparent',
         border: '1px solid rgba(255,255,255,0.15)', padding: '3px 8px', cursor: 'pointer',
       }}>DISMISS</button>
-    </div>
-  )
-}
-
-// ─── Gateway 03 mock (not yet implemented as separate component) ──────────────
-
-function Gateway03Mock({ projectId, onComplete }) {
-  const [exporting, setExporting] = useState(false)
-  const [exportError, setExportError] = useState(null)
-
-  const handleExportBeat = useCallback(async () => {
-    if (!projectId) return
-    setExportError(null)
-    setExporting(true)
-    try {
-      const blob = await apiGetBlob(`/api/projects/${projectId}/download-beat`)
-      triggerDownload(blob, 'CLEARED_BEAT.mp3')
-    } catch (e) {
-      setExportError(`Export: ${e.message}`)
-    } finally {
-      setExporting(false)
-    }
-  }, [projectId])
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ flex: 1, padding: '18px', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-        <div style={{
-          fontFamily: 'JetBrains Mono', fontSize: '9px',
-          color: 'var(--neon)', letterSpacing: '0.15em',
-          borderBottom: '1px solid rgba(0,255,136,0.2)', paddingBottom: '10px',
-        }}>
-          EARNED PRODUCT — THE CLEARED BEAT
-        </div>
-        <div style={{ fontFamily: 'JetBrains Mono', fontSize: '11px', lineHeight: 2, color: 'var(--text-terminal)' }}>
-          <div style={{ marginBottom: '10px', color: 'var(--text-secondary)', fontSize: '10px' }}>
-            ORIGINAL INSTRUMENTAL — CLEARED FOR STANDALONE EXPORT
-          </div>
-          <div>Original DNA preserved at <span style={{ color: '#fff' }}>{MOCK_GATEWAY_03.similarityAchieved}%</span></div>
-          <div>Deviation from source: <span style={{ color: 'var(--neon)' }}>{MOCK_GATEWAY_03.deviationAchieved}%</span></div>
-          <div>New key: <span style={{ color: '#fff' }}>{MOCK_GATEWAY_03.key}</span></div>
-          <div>New BPM: <span style={{ color: '#fff' }}>{MOCK_GATEWAY_03.bpm}</span></div>
-          <div style={{ marginTop: '10px', fontSize: '9px', color: 'var(--text-secondary)' }}>
-            All modifications traceable to source material. No unknowns.
-          </div>
-        </div>
-        <SimilarityScale current={MOCK_GATEWAY_03.similarityAchieved} target={MOCK_GATEWAY_03.deviationAchieved} locked />
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1px' }}>
-          <MetricCell label="BPM" value={String(MOCK_GATEWAY_03.bpm)} />
-          <MetricCell label="KEY" value={MOCK_GATEWAY_03.key} />
-          <MetricCell label="TEMPO SHIFT" value={MOCK_GATEWAY_03.tempoShift} />
-          <MetricCell label="SIMILARITY" value={`${MOCK_GATEWAY_03.similarityAchieved}%`} />
-          <MetricCell label="DEVIATION" value={`${MOCK_GATEWAY_03.deviationAchieved}%`} highlight />
-        </div>
-      </div>
-      <div style={{ padding: '14px 18px', borderTop: '1px solid var(--border-dim)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-        {exportError && (
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: '9px', color: 'var(--danger)' }}>
-            // {exportError}
-          </div>
-        )}
-        <BtnHollow onClick={!exporting ? handleExportBeat : undefined} disabled={exporting}>
-          {exporting ? '// PACKAGING...' : 'DOWNLOAD CLEARED BEAT'}
-        </BtnHollow>
-        <BtnPrimary onClick={onComplete}>{'>'}  PROCEED TO LYRIC REBUILD</BtnPrimary>
-      </div>
     </div>
   )
 }
@@ -607,7 +436,6 @@ export default function App() {
     if (state === 'gateway_01') startProcessing('deconstructing')
     else if (state === 'gateway_02') startProcessing('morphing')
     else if (state === 'gateway_03') startProcessing('rebuilding_lyrics')
-    // Gateway 05 (voice clone) is deferred — proceed from 04 lands on the deferred note.
     else if (state === 'gateway_04') startProcessing('planting')
   }, [state, startProcessing])
 
@@ -787,7 +615,7 @@ export default function App() {
             )}
             {phase === 3 && state === 'gateway_03' && (
               <GatewayErrorBoundary>
-                <Gateway03Mock projectId={projectId} onComplete={handleGatewayComplete} />
+                <Gateway03Morph projectId={projectId} project={project} onComplete={handleGatewayComplete} />
               </GatewayErrorBoundary>
             )}
             {phase === 3 && state === 'gateway_04' && (
@@ -800,14 +628,13 @@ export default function App() {
               </GatewayErrorBoundary>
             )}
             {phase === 3 && state === 'gateway_05' && (
-              <div style={{ padding: '18px', fontFamily: 'JetBrains Mono', fontSize: '11px', lineHeight: 2, color: 'var(--text-secondary)' }}>
-                <div style={{ color: 'var(--neon)', fontSize: '9px', letterSpacing: '0.15em', marginBottom: '12px' }}>
-                  // GATEWAY 05 — VOICE CLONE
-                </div>
-                DEFERRED IN THIS BUILD.<br />
-                Voice cloning (F5-TTS) is not wired into this release.<br />
-                Your cleared beat and lyric canvas from Gateways 02–04 are the final outputs.
-              </div>
+              <GatewayErrorBoundary>
+                <Gateway05VoiceClone
+                  projectId={projectId}
+                  project={project}
+                  onComplete={handleGatewayComplete}
+                />
+              </GatewayErrorBoundary>
             )}
           </div>
         </div>
