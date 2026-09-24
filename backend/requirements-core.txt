@@ -8,3 +8,7 @@ pydantic>=2.11.0
 httpx>=0.28.0
 starlette>=0.37.2
 pyphen>=0.17.0
+# Used directly by server.py (sync remote calls) and morph_engine.py (mp3 encode) —
+# previously relied on transitively installed copies.
+requests>=2.31.0
+lameenc>=1.7.0

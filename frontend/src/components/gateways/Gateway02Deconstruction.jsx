@@ -245,8 +245,8 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
           : MOCK_GATEWAY_02.stems,
         midiFiles: transformResult.midi_files?.length ?? MOCK_GATEWAY_02.midiFiles,
         musicXmlFiles: transformResult.musicxml_files?.length ?? MOCK_GATEWAY_02.musicXmlFiles,
-        bpm: MOCK_GATEWAY_02.bpm,
-        key: MOCK_GATEWAY_02.key,
+        bpm: transformResult.bpm ?? MOCK_GATEWAY_02.bpm,
+        key: transformResult.key ?? MOCK_GATEWAY_02.key,
       }
     : MOCK_GATEWAY_02
 

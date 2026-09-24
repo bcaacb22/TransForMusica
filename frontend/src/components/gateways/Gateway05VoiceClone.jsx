@@ -364,7 +364,7 @@ export default function Gateway05VoiceClone({ projectId, project, onComplete }) 
           {/* Metrics during processing */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
             <MetricCell label="STATUS" value="PROCESSING" highlight />
-            <MetricCell label="ENGINE" value="XTTS-V2" />
+            <MetricCell label="ENGINE" value="TTS SERVER" />
             <MetricCell label="SAMPLE" value={voiceProfile?.name || '—'} />
             <MetricCell label="POLL INTERVAL" value="3S" />
           </div>
@@ -398,7 +398,7 @@ export default function Gateway05VoiceClone({ projectId, project, onComplete }) 
           {/* Metrics */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px' }}>
             <MetricCell label="STATUS" value="COMPLETE" highlight />
-            <MetricCell label="ENGINE" value="XTTS-V2" />
+            <MetricCell label="ENGINE" value="TTS SERVER" />
             <MetricCell label="OUTPUT" value="CLONED_VOCAL.WAV" />
           </div>
 

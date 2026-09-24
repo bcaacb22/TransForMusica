@@ -77,7 +77,7 @@ from style_engine import (
     build_learned_style_prompt,
 )
 from task_manager import create_bounded_task
-from morph_engine import run_morph_pipeline, MorphPlanError
+from morph_engine import run_morph_pipeline, MorphPlanError, analyze_audio
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -145,6 +145,7 @@ class UserStyleSampleAdd(BaseModel):
 
 class LyricsRequest(BaseModel):
     style: str  # preset key (trap/boom_bap/...) or 'defined' or 'learned' or 'blend'
+    structure_mode: Optional[str] = None  # 'placeholder' = keep original bar/rhyme structure, 'fresh' = new structure
     custom_prompt: Optional[str] = None
     user_style_id: Optional[str] = None  # when style == 'defined' or 'blend'
     ollama_base_url: Optional[str] = None
@@ -308,6 +309,20 @@ async def add_to_profile_corpus(text: str, source: str = 'generated', title: Opt
 
 
 # Advanced Music Analysis Functions
+def _analyze_file_features(file_path: str) -> dict:
+    """Load + analyze one audio file (bpm/key). Runs in a worker thread —
+    librosa.load, beat_track and chroma_cqt are all CPU-heavy."""
+    y, sr = librosa.load(file_path, sr=None, mono=True, duration=60)
+    return analyze_audio(y, sr)
+
+
+def _save_upload_sync(src, dest: Path):
+    """Copy an UploadFile's spooled file to disk. Runs in a worker thread —
+    uploads are ~39MB and copyfileobj is blocking."""
+    with open(dest, "wb") as buffer:
+        shutil.copyfileobj(src, buffer)
+
+
 def _encode_mp3(wav_path: Path, mp3_path: Path, bitrate: int = 320):
     """Encode a wav stem to mp3 with lameenc (ships as a demucs dependency)."""
     import soundfile as _sf
@@ -750,8 +765,7 @@ async def upload_file(project_id: str, file: UploadFile = File(...)):
     filename = f"{project_id}_original{file_extension}"
     file_path = UPLOAD_DIR / filename
     
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    await asyncio.to_thread(_save_upload_sync, file.file, file_path)
     
     # Update project
     await db.projects.update_one(
@@ -865,16 +879,13 @@ async def legal_scan(project_id: str):
         except Exception:
             pass
 
-        # Extract audio features with librosa
+        # Extract audio features with librosa — the whole analysis runs in a
+        # worker thread (beat_track + chroma_cqt are CPU-heavy; only load was
+        # offloaded before, leaving feature extraction on the event loop).
         try:
-            y, sr = await asyncio.to_thread(librosa.load, str(file_path), sr=None, mono=True, duration=60)
-            tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-            # librosa >=0.10 returns tempo as a 1-element array, not a scalar
-            bpm = round(float(np.squeeze(tempo)), 1)
-            chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-            key_idx = int(np.argmax(chroma.mean(axis=1)))
-            key_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-            key = key_names[key_idx]
+            analysis = await asyncio.to_thread(_analyze_file_features, str(file_path))
+            bpm = analysis["bpm"]
+            key = analysis["key_name"]
         except Exception:
             bpm = None
             key = None
@@ -1076,6 +1087,9 @@ async def transform_status(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
     status = project.get("transform_status", "pending")
     if status == "complete":
+        # bpm/key come from the GW01 legal scan of the same source file — real
+        # detected values instead of frontend mocks (None if GW01 never ran).
+        legal = project.get("legal_scan") or {}
         return {
             "status": "complete",
             "success": True,
@@ -1084,6 +1098,8 @@ async def transform_status(project_id: str):
             "musicxml_files": project.get("musicxml_files", []),
             "audio_stems": project.get("audio_stems", []),
             "main_midi": project.get("main_midi"),
+            "bpm": legal.get("bpm"),
+            "key": legal.get("key"),
         }
     if status == "failed":
         # 200, not 500: a failed transform is a valid status answer. A 500 here
@@ -1299,17 +1315,22 @@ async def download_stems_package(project_id: str):
                 zipf.write(p, f"{folder}/{n}" if folder else n)
 
     try:
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            vocal_extra = [project["transcription_file"]] if project.get("transcription_file") else []
-            _add(zipf, "Vocal", vocal_extra + [
-                "vocals.mp3", "vocals.wav", "vocals.mid", "vocals.musicxml"])
-            _add(zipf, "Instrumental", [
-                "instrumental.mp3", "instrumental.wav", "instrumental.mid", "instrumental.musicxml"])
-            _add(zipf, "Full_Arrangement", ["full_song.mid", "full_arrangement.musicxml"])
-            for stem in ["drums", "bass", "other"]:
-                _add(zipf, f"Stems/{stem}", [
-                    f"{stem}.mp3", f"{stem}.wav", f"{stem}.mid", f"{stem}.musicxml"])
-            _add(zipf, "", ["transformation_guide.txt"])
+        # ZIP build (up to ~180MB of wav/mp3/midi) runs in a worker thread —
+        # it was blocking the event loop for seconds.
+        def _build_zip():
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                vocal_extra = [project["transcription_file"]] if project.get("transcription_file") else []
+                _add(zipf, "Vocal", vocal_extra + [
+                    "vocals.mp3", "vocals.wav", "vocals.mid", "vocals.musicxml"])
+                _add(zipf, "Instrumental", [
+                    "instrumental.mp3", "instrumental.wav", "instrumental.mid", "instrumental.musicxml"])
+                _add(zipf, "Full_Arrangement", ["full_song.mid", "full_arrangement.musicxml"])
+                for stem in ["drums", "bass", "other"]:
+                    _add(zipf, f"Stems/{stem}", [
+                        f"{stem}.mp3", f"{stem}.wav", f"{stem}.mid", f"{stem}.musicxml"])
+                _add(zipf, "", ["transformation_guide.txt"])
+
+        await asyncio.to_thread(_build_zip)
 
         return FileResponse(
             zip_path,
@@ -1496,6 +1517,32 @@ async def generate_lyrics(project_id: str, request: LyricsRequest):
             brief += f"\n\nAdditional: {request.custom_prompt}"
         base_prompt = brief + "\n\nWrite AT LEAST 24 bars. Output raw lyric lines only — no headers, no markdown."
 
+    # Structure mode (CEREMONIES GW04 dichotomy): PLACEHOLDER CADENCE keeps the
+    # original bar/rhyme structure and rewrites content; FRESH builds new
+    # structure from the final beat. Sent by the frontend, honored here.
+    structure_mode = (request.structure_mode or "").strip().lower()
+    if structure_mode == "placeholder":
+        original = (project.get("original_transcription") or "").strip()
+        if original:
+            base_prompt += (
+                "\n\n### Structure mode: PLACEHOLDER CADENCE\n"
+                "Keep the bar count, line lengths, and rhyme scheme of the ORIGINAL lyrics below — "
+                "rewrite the content only (new words, new themes, same skeleton). Match line-for-line.\n\n"
+                f"### Original lyrics (structure to preserve)\n{original[:2000]}"
+            )
+        else:
+            base_prompt += (
+                "\n\n### Structure mode: PLACEHOLDER CADENCE\n"
+                "No original transcription is available for this track — write a conventional "
+                "verse/hook structure (24-32 bars) with a tight, consistent rhyme scheme."
+            )
+    elif structure_mode == "fresh":
+        base_prompt += (
+            "\n\n### Structure mode: FRESH DECONSTRUCTION\n"
+            "Ignore any original song structure — build a NEW phonetic architecture from the "
+            "final morphed beat: choose your own section layout, bar counts, and rhyme patterns."
+        )
+
     # Call Ollama ---------------------------------------------
     try:
         system_msg = (
@@ -1601,8 +1648,7 @@ async def add_audio_sample_to_style(style_id: str, file: UploadFile = File(...))
     # Save temp
     suffix = Path(file.filename or "").suffix or ".wav"
     tmp_path = UPLOAD_DIR / f"style_{style_id}_sample{suffix}"
-    with open(tmp_path, "wb") as buf:
-        shutil.copyfileobj(file.file, buf)
+    await asyncio.to_thread(_save_upload_sync, file.file, tmp_path)
 
     try:
         result = await asyncio.to_thread(whisper_transcribe, str(tmp_path))
@@ -1660,8 +1706,7 @@ async def add_corpus_audio(file: UploadFile = File(...), title: Optional[str] = 
     """Upload audio, transcribe with local Whisper, add to profile corpus."""
     suffix = Path(file.filename or "").suffix or ".wav"
     tmp_path = UPLOAD_DIR / f"corpus_audio{suffix}"
-    with open(tmp_path, "wb") as buf:
-        shutil.copyfileobj(file.file, buf)
+    await asyncio.to_thread(_save_upload_sync, file.file, tmp_path)
     try:
         result = await asyncio.to_thread(whisper_transcribe, str(tmp_path))
     finally:
@@ -1754,8 +1799,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     """General-purpose local Whisper transcription."""
     suffix = Path(file.filename or "").suffix or ".wav"
     tmp_path = UPLOAD_DIR / f"transcribe{suffix}"
-    with open(tmp_path, "wb") as buf:
-        shutil.copyfileobj(file.file, buf)
+    await asyncio.to_thread(_save_upload_sync, file.file, tmp_path)
     try:
         result = await asyncio.to_thread(whisper_transcribe, str(tmp_path))
     finally:
@@ -1895,8 +1939,7 @@ async def upload_voice_sample(project_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=404, detail="Project not found")
     suffix = Path(file.filename or "sample.wav").suffix or ".wav"
     sample_path = UPLOAD_DIR / f"{project_id}_voice_sample{suffix}"
-    with open(sample_path, "wb") as buf:
-        shutil.copyfileobj(file.file, buf)
+    await asyncio.to_thread(_save_upload_sync, file.file, sample_path)
     await db.projects.update_one(
         {"id": project_id},
         {"$set": {"voice_sample_file": sample_path.name, "updated_at": datetime.now(timezone.utc).isoformat()}}
@@ -1953,10 +1996,10 @@ async def _run_voice_clone(project_id: str):
         sample_path = UPLOAD_DIR / project["voice_sample_file"]
         lyrics = project.get("lyrics", "")
         loop = asyncio.get_event_loop()
-        if VOICE_CLONE_URL:
-            out_path = await loop.run_in_executor(None, _call_xtts_server, str(sample_path), lyrics)
-        else:
-            out_path = await loop.run_in_executor(None, _call_local_f5tts, str(sample_path), lyrics)
+        # VOICE_CLONE_URL is guaranteed set — the endpoint 503s when it's empty.
+        # The server speaks the shared /health + /clone wire contract
+        # (backend/xtts_server.py and backend/f5tts_server.py both implement it).
+        out_path = await loop.run_in_executor(None, _call_voice_clone_server, str(sample_path), lyrics)
         await db.projects.update_one(
             {"id": project_id},
             {"$set": {
@@ -1976,16 +2019,15 @@ async def _run_voice_clone(project_id: str):
 
 
 def _clean_lyrics_for_tts(text: str) -> str:
-    """Strip LLM markdown/section headers so F5-TTS doesn't try to speak them literally."""
+    """Strip LLM markdown/section headers so the TTS engine doesn't speak them literally."""
     import re
     # Strip bold/italic markdown
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
     text = re.sub(r'\*(.+?)\*', r'\1', text)
-    # Strip section headers like (Verse 1), (Hook), (Chorus), (Bridge), (Outro), (Intro)
-    text = re.sub(
-        r'^\s*\((Verse\s*\d*|Hook|Chorus|Bridge|Outro|Intro)\)\s*$',
-        '', text, flags=re.IGNORECASE | re.MULTILINE
-    )
+    # Strip any standalone (Section) or [Section] label line — (Verse 1), (Hook), [Beat drops], ...
+    text = re.sub(r'^\s*[\(\[].*?[\)\]]\s*$', '', text, flags=re.MULTILINE)
+    # Strip markdown heading markers
+    text = re.sub(r'^#{1,6}\s*', '', text, flags=re.MULTILINE)
     # Strip horizontal rule lines
     text = re.sub(r'^\s*-{2,}\s*$', '', text, flags=re.MULTILINE)
     # Strip lines that are ONLY punctuation/symbols (no word characters)
@@ -1993,21 +2035,16 @@ def _clean_lyrics_for_tts(text: str) -> str:
     # Collapse multiple blank lines to a single blank line
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
-    # Truncate to 800 chars for F5-TTS reliability
+    # Truncate to 800 chars for TTS reliability
     if len(text) > 800:
         text = text[:800].rsplit('\n', 1)[0].strip()
     return text
 
 
-def _call_xtts_server(sample_path: str, lyrics: str) -> str:
-    import re, requests
+def _call_voice_clone_server(sample_path: str, lyrics: str) -> str:
+    import requests
 
-    # Strip markdown formatting so TTS speaks clean text
-    clean = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', lyrics)  # bold/italic
-    clean = re.sub(r'^#{1,6}\s*', '', clean, flags=re.MULTILINE)  # headings
-    clean = re.sub(r'^-{3,}$', '', clean, flags=re.MULTILINE)  # horizontal rules
-    clean = re.sub(r'^\s*[\(\[].*?[\)\]]\s*$', '', clean, flags=re.MULTILINE)  # (Hook), [Verse] labels
-    clean = re.sub(r'\n{3,}', '\n\n', clean).strip()
+    clean = _clean_lyrics_for_tts(lyrics)
 
     ref_transcript = _remote_transcribe(sample_path)
 
@@ -2022,39 +2059,6 @@ def _call_xtts_server(sample_path: str, lyrics: str) -> str:
     out_path = str(UPLOAD_DIR / f"{Path(sample_path).stem}_cloned.wav")
     with open(out_path, "wb") as out_f:
         out_f.write(resp.content)
-    return out_path
-
-
-_local_f5tts_instance = None
-
-def _call_local_f5tts(sample_path: str, lyrics: str) -> str:
-    """Run F5-TTS in-process on the local machine (CPU). No separate server needed."""
-    global _local_f5tts_instance
-    import re
-    from f5_tts.api import F5TTS
-
-    # Strip markdown
-    clean = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', lyrics)
-    clean = re.sub(r'^#{1,6}\s*', '', clean, flags=re.MULTILINE)
-    clean = re.sub(r'^-{3,}$', '', clean, flags=re.MULTILINE)
-    clean = re.sub(r'^\s*[\(\[].*?[\)\]]\s*$', '', clean, flags=re.MULTILINE)
-    clean = re.sub(r'\n{3,}', '\n\n', clean).strip()
-    if len(clean) > 800:
-        clean = clean[:800].rsplit('\n', 1)[0].strip()
-
-    ref_transcript = _remote_transcribe(sample_path)
-
-    if _local_f5tts_instance is None:
-        _local_f5tts_instance = F5TTS()
-
-    out_path = str(UPLOAD_DIR / f"{Path(sample_path).stem}_cloned.wav")
-    _local_f5tts_instance.infer(
-        ref_file=sample_path,
-        ref_text=ref_transcript,
-        gen_text=clean,
-        file_wave=out_path,
-        seed=-1,
-    )
     return out_path
 
 

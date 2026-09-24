@@ -1,4 +1,9 @@
-"""Beat Maker backend API tests (pytest)."""
+"""Transformusic backend API tests (pytest, live server).
+
+Requires a RUNNING backend + MongoDB. Point at the fork with:
+    REACT_APP_BACKEND_URL=http://localhost:8001 pytest backend/tests/backend_test.py
+LLM-dependent tests are skipped unless the mock Ollama server is up on :11434.
+"""
 import os
 import io
 import time
@@ -24,6 +29,18 @@ def _make_short_mp3():
     buf.seek(0)
     return buf
 
+
+def _mock_ollama_up() -> bool:
+    """True if the mock Ollama server (2 fake models, canned lyrics) is reachable."""
+    try:
+        requests.get("http://localhost:11434/api/tags", timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+_needs_mock_ollama = pytest.mark.skipif(
+    not _mock_ollama_up(), reason="mock Ollama server not running on :11434")
 @pytest.fixture(scope="module")
 def client():
     s = requests.Session()
@@ -42,6 +59,7 @@ def test_ollama_config(client):
     data = r.json()
     assert "base_url" in data and "model" in data
 
+@_needs_mock_ollama
 def test_ollama_test_success(client):
     r = client.post(f"{API}/ollama/test", json={"base_url": "http://localhost:11434"})
     assert r.status_code == 200
@@ -80,21 +98,32 @@ def test_upload_file(client, project_id):
     assert r.status_code == 200, r.text
     assert "filename" in r.json()
 
-# --- Transform (basic-pitch + music21 pipeline) ---
+# --- Transform (async task: trigger + poll transform-status) ---
 def test_transform_and_download(client, project_id):
-    r = client.post(f"{API}/projects/{project_id}/transform", timeout=300)
+    r = client.post(f"{API}/projects/{project_id}/transform", timeout=60)
     assert r.status_code == 200, r.text
-    data = r.json()
-    assert data.get("stems_available") is True
-    assert len(data.get("midi_files", [])) >= 1
-    assert len(data.get("musicxml_files", [])) >= 1
+    assert r.json().get("status") == "processing"
 
-    # Verify stems dir exists
-    stems_dir = f"/app/backend/uploads/{project_id}_stems"
-    assert os.path.isdir(stems_dir), f"stems dir missing: {stems_dir}"
+    # Poll until complete/failed — a 3s sine wave through local Demucs + Basic
+    # Pitch takes on the order of a minute on CPU.
+    deadline = time.time() + 600
+    final = None
+    while time.time() < deadline:
+        rs = client.get(f"{API}/projects/{project_id}/transform-status", timeout=30)
+        assert rs.status_code == 200, rs.text
+        data = rs.json()
+        if data.get("status") in ("complete", "failed"):
+            final = data
+            break
+        assert data.get("status") == "processing", f"unexpected status: {data}"
+        time.sleep(3)
+    assert final is not None, "transform did not finish within 600s"
+    assert final.get("status") == "complete", f"transform failed: {final.get('error')}"
+    assert len(final.get("midi_files", [])) >= 1
+    assert len(final.get("musicxml_files", [])) >= 1
 
-    # Download ZIP
-    rz = client.get(f"{API}/projects/{project_id}/download-stems")
+    # Download ZIP — proves stems artifacts exist server-side
+    rz = client.get(f"{API}/projects/{project_id}/download-stems", timeout=300)
     assert rz.status_code == 200
     zbuf = io.BytesIO(rz.content)
     with zipfile.ZipFile(zbuf) as zf:
@@ -103,6 +132,7 @@ def test_transform_and_download(client, project_id):
     assert any(n.endswith(".musicxml") for n in names), f"no .musicxml in zip: {names}"
 
 # --- Generate Lyrics via Ollama (mock) ---
+@_needs_mock_ollama
 def test_generate_lyrics_ollama_success(client, project_id):
     payload = {
         "project_id": project_id,
@@ -238,8 +268,8 @@ def test_fingerprint_compute_heuristic(client):
     assert prof.get("llm_theme_summary") in (None, "")
 
 
+@_needs_mock_ollama
 def test_fingerprint_compute_with_llm(client):
-    # Expects mock Ollama running on localhost:11434
     r = client.post(
         f"{API}/profile/fingerprint/compute",
         json={"use_llm_theme": True, "ollama_base_url": OLLAMA_URL, "ollama_model": OLLAMA_MODEL},
@@ -310,6 +340,7 @@ def test_profile_corpus_audio_endpoint(client):
 
 
 # --- Lyrics generate in learned mode ---
+@_needs_mock_ollama
 def test_generate_lyrics_learned_empty_corpus_400(client, project_id):
     _reset_profile(client)
     payload = {
@@ -323,6 +354,7 @@ def test_generate_lyrics_learned_empty_corpus_400(client, project_id):
     assert r.status_code == 400, r.text
 
 
+@_needs_mock_ollama
 def test_generate_lyrics_learned_success(client, project_id):
     _reset_profile(client)
     # seed corpus
@@ -350,6 +382,7 @@ def test_generate_lyrics_learned_success(client, project_id):
     assert after[-1]["source"] == "generated"
 
 
+@_needs_mock_ollama
 def test_generate_lyrics_defined_with_user_style(client, project_id):
     cs = client.post(f"{API}/user-styles", json={
         "name": "TEST_defined_style",
@@ -371,6 +404,7 @@ def test_generate_lyrics_defined_with_user_style(client, project_id):
         client.delete(f"{API}/user-styles/{sid}")
 
 
+@_needs_mock_ollama
 def test_generate_lyrics_defined_missing_id(client, project_id):
     payload = {"style": "defined", "ollama_base_url": OLLAMA_URL, "ollama_model": OLLAMA_MODEL}
     r = client.post(f"{API}/projects/{project_id}/generate-lyrics", json=payload, timeout=30)

@@ -7,6 +7,9 @@ logger = logging.getLogger(__name__)
 _semaphore: asyncio.Semaphore | None = None
 MAX_CONCURRENT_TASKS = 10
 
+# Strong references to in-flight tasks (asyncio only holds weak refs).
+_background_tasks: set = set()
+
 
 def get_semaphore() -> asyncio.Semaphore:
     global _semaphore
@@ -30,4 +33,9 @@ async def create_bounded_task(coro, *, name: str = ""):
             finally:
                 logger.info(f"Task slot released: {name}")
 
-    return asyncio.create_task(_guarded(), name=name)
+    task = asyncio.create_task(_guarded(), name=name)
+    # asyncio keeps only a weak reference to tasks — without this strong ref a
+    # fire-and-forget task can be garbage-collected mid-flight.
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
