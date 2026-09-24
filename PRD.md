@@ -32,19 +32,18 @@ Musicians need a tool that takes any uploaded instrumental and transforms it int
 - [x] Transcription (faster-whisper via Demucs server)
 - [x] LLM settings UI (provider selector, test connection, model picker)
 - [x] Download stems as ZIP, download lyrics as text, export project JSON
-- [ ] Gateway 03: Morph Engine (UI exists, no backend)
-- [ ] Gateway 05: Voice Clone (endpoints exist, F5-TTS integration untested)
+- [x] Gateway 03: Morph Engine (deterministic DSP: tempo/pitch from similarity target, key/BPM overrides, measured achieved similarity, preview + re-morph)
+- [x] Gateway 05: Voice Clone UI wired end-to-end (upload → trigger → poll → download); requires `VOICE_CLONE_URL` TTS server — clone trigger returns 503 until configured
 
 ## Prioritized Backlog
 
 ### P0 — Working
-- Upload + legal scan + deconstruction + lyric generation pipeline end-to-end
+- Upload + legal scan + deconstruction + morph + lyric generation pipeline end-to-end
 
 ### P1 — Next
-- Gateway 03 backend (BPM/key/tempo morphing with pitch-shift algorithms)
-- Gateway 05 end-to-end testing (F5-TTS voice clone)
-- Refactor server.py into routers/services modules (currently 1700+ lines)
-- Move synchronous MIDI conversion to asyncio.to_thread
+- Gateway 05 voice server provisioning (run `xtts_server.py` or `f5tts_server.py`, set `VOICE_CLONE_URL`, complete a real cloned-vocal run)
+- Refactor server.py into routers/services modules (currently ~2100 lines)
+- Key detection upgrade: chroma argmax is major-only — add Krumhansl-Schmuckler major/minor profiling
 
 ### P2 — Backlog
 - User authentication (JWT, per-user profiles)
@@ -52,6 +51,7 @@ Musicians need a tool that takes any uploaded instrumental and transforms it int
 - DAW plugin export (VST/AU metadata)
 - Persist LLM settings server-side per user
 - Upload validation by magic bytes
+- Morph: rhythm-grid perturbation + NL creative brief (CEREMONIES.md feel param)
 
 ## Tech Stack
 
@@ -70,7 +70,7 @@ Musicians need a tool that takes any uploaded instrumental and transforms it int
 
 ## Next Tasks
 
-1. Implement Gateway 03 morph backend (pitch-shift, tempo-stretch, key detection)
-2. End-to-end test Gateway 05 voice clone with F5-TTS server
-3. Split server.py into route modules
-4. Add error recovery for failed transforms (retry mechanism)
+1. Provision a voice-clone TTS server and complete the first Gateway 05 cloned-vocal run
+2. Split server.py into route modules (projects / gateway ops / styles / profile / files)
+3. Add error recovery for failed transforms (retry mechanism)
+4. Major/minor-aware key detection for legal scan + morph planning

@@ -57,7 +57,8 @@ Opens at **http://localhost:3200**
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `REACT_APP_BACKEND_URL` | `http://localhost:8000` | Backend API base URL |
+| `VITE_DEV_PORT` | `3200` | Vite dev server port |
+| `VITE_BACKEND_URL` | `http://localhost:8000` | Backend base URL for the `/api` dev proxy |
 
 ## Quick Start
 
@@ -78,9 +79,12 @@ python demucs_server.py
 ```
 Set `DEMUCS_URL=http://<tailscale-ip>:8600` in `backend/.env`.
 
-### Voice Clone (F5-TTS)
-Requires a separate F5-TTS or XTTS server.  
-Set `VOICE_CLONE_URL=http://<tailscale-ip>:8500` in `backend/.env`.
+### Voice Clone (Gateway 05)
+Requires a separate TTS server speaking the `/health` + `/clone` wire contract —
+run either `backend/xtts_server.py` (XTTS-v2) or `backend/f5tts_server.py` (F5-TTS)
+on the GPU machine, then set `VOICE_CLONE_URL=http://<tailscale-ip>:8500` in `backend/.env`.
+Without it, Gateway 05 UI is fully wired but the clone trigger returns
+`503 Voice clone service is not configured`.
 
 ## Gateway Pipeline
 
@@ -88,6 +92,13 @@ Set `VOICE_CLONE_URL=http://<tailscale-ip>:8500` in `backend/.env`.
 |---------|------|--------|
 | 01 | Legal Diagnostic | Live — AuDD.io fingerprint scan (requires `AUDD_API_KEY`) |
 | 02 | Deconstruction | **Live** — stem separation (Demucs) + MIDI (Basic Pitch) + MusicXML (music21) |
-| 03 | Morph Engine | UI only — no beat morphing backend yet |
-| 04 | Lyric Rebuild | **Live** — LLM lyric generation with style presets, user styles, learned fingerprint |
-| 05 | Voice Clone | Partial — endpoints exist, F5-TTS integration present but untested |
+| 03 | Morph Engine | **Live** — deterministic DSP morph (`morph_engine.py`): tempo/pitch from similarity target, key/BPM override, measured achieved similarity |
+| 04 | Lyric Rebuild | **Live** — LLM lyric generation, style presets/user styles/learned fingerprint, CADENCE vs FRESH structure modes |
+| 05 | Voice Clone | UI live, backend live — requires `VOICE_CLONE_URL` (XTTS/F5-TTS server); 503 until configured |
+
+## Fork Ports
+
+This fork runs alongside the original app via `start-fork.bat`:
+backend **8001** (`RUN_PORT`), frontend **3201** (`frontend/.env`: `VITE_DEV_PORT`,
+`VITE_BACKEND_URL=http://localhost:8001`; the Vite proxy forwards `/api`, so the
+browser origin stays 3201 and `CORS_ORIGINS` needs no change).

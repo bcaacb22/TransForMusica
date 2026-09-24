@@ -6,9 +6,9 @@ Transformusic is a 5-gateway beat deconstruction and lyric generation pipeline. 
 
 1. **Legal Diagnostic** — AuDD.io fingerprint scan, similarity score, violation risk
 2. **Deconstruction** — Demucs stem separation → MIDI (Basic Pitch) → MusicXML (music21)
-3. **Morph Engine** — BPM/key reshaping UI *(backend not yet implemented)*
-4. **Lyric Rebuild** — local LLM generation with style fingerprinting
-5. **Voice Clone** — F5-TTS voice cloning onto generated lyrics
+3. **Morph Engine** — deterministic DSP reshaping: time-stretch + pitch-shift driven by a similarity target (or explicit key/BPM), with measured achieved similarity
+4. **Lyric Rebuild** — local LLM generation with style fingerprinting; CADENCE (keep original structure) vs FRESH (new structure) modes
+5. **Voice Clone** — TTS-server voice cloning onto generated lyrics (requires `VOICE_CLONE_URL`)
 
 ## Stack
 
@@ -16,16 +16,17 @@ Transformusic is a 5-gateway beat deconstruction and lyric generation pipeline. 
 |-------|------|
 | Backend | FastAPI (Python 3.11), async via uvicorn |
 | Database | MongoDB (motor async driver) |
-| LLM | LM Studio / Ollama (OpenAI-compatible API, default port 1234) |
 | Stem Separation | Demucs `htdemucs` — remote GPU server or local CPU fallback |
 | Audio-to-MIDI | Basic Pitch (Spotify) |
+| Morph DSP | librosa `time_stretch`/`pitch_shift`, pretty_midi (`morph_engine.py`) |
 | Notation | music21, pretty_midi, mido |
 | Transcription | faster-whisper (tiny, GPU or CPU) — runs on remote Demucs server |
 | Music Recognition | AuDD.io API (legal scan) |
-| Voice Clone | F5-TTS or XTTS — remote server or local |
+| Voice Clone | XTTS-v2 or F5-TTS via standalone server (`xtts_server.py` / `f5tts_server.py`, port 8500) |
 | Style Engine | Custom heuristic + LLM hybrid (`style_engine.py`) |
-| Frontend | React 19, Vite, Tailwind CSS, shadcn/ui (48 components), Lucide icons |
-| Transport | REST (fetch), multipart file uploads |
+| Task Bounding | `task_manager.py` — global `asyncio.Semaphore(10)`, strong-ref background tasks |
+| Frontend | React 19, Vite 8, Tailwind CSS, per-gateway components, resilient fetch client |
+| Transport | REST (fetch + retry/backoff), multipart file uploads, Vite `/api` proxy |
 
 ## Directory Structure
 
@@ -40,38 +41,46 @@ Transformusic/
 │   ├── PRD.md             # Product requirements
 │   └── test_credentials.md
 ├── backend/
-│   ├── server.py          # All FastAPI endpoints, models, pipeline logic
+│   ├── server.py          # All FastAPI endpoints, models, pipeline logic (~2100 lines)
+│   ├── morph_engine.py    # Gateway 03 — deterministic DSP morph + similarity measurement
 │   ├── style_engine.py    # Lyric fingerprinting (heuristic + LLM hybrid)
+│   ├── task_manager.py    # Bounded background tasks (semaphore 10, strong refs)
 │   ├── run_app.py         # Launcher — stubs basic_pitch if not installed
 │   ├── demucs_server.py   # Standalone Demucs + Whisper server (run on Windows GPU)
+│   ├── xtts_server.py     # Standalone XTTS-v2 clone server (/health + /clone, :8500)
+│   ├── f5tts_server.py    # Standalone F5-TTS clone server (/health + /clone, :8500)
 │   ├── requirements-core.txt   # API-only deps
 │   ├── requirements-audio.txt  # Full audio pipeline deps
 │   ├── .env               # MongoDB, LLM, AuDD.io, Demucs/Voice URLs
 │   ├── install.bat        # Windows venv + dep installer
-│   └── uploads/           # Runtime — audio files, stems, MIDI (gitignored)
+│   ├── tests/backend_test.py   # Live-server pytest suite (REACT_APP_BACKEND_URL)
+│   └── uploads/           # Runtime — audio files, stems, MIDI, morphs (gitignored)
 └── frontend/
     ├── src/
-    │   ├── App.jsx         # Single-file SPA (~2,000 lines) — all 5 gateways
+    │   ├── App.jsx         # SPA shell — 3-pane gateway state machine
     │   ├── main.jsx
-    │   ├── components/ui/  # shadcn/ui primitives (48 components)
+    │   ├── components/gateways/  # Gateway01Legal, 02Deconstruction, 03Morph, 04LyricRebuild, 05VoiceClone
+    │   ├── components/ErrorBoundary.jsx  # per-gateway boundary
+    │   ├── lib/apiClient.js      # fetch + retry/backoff + toasts
+    │   ├── components/ui/  # shadcn/ui primitives (unused by current UI)
     │   ├── hooks/use-toast.js
     │   └── lib/utils.js
     ├── package.json
-    ├── vite.config.js
+    ├── vite.config.js      # /api proxy → VITE_BACKEND_URL
     ├── tailwind.config.js
-    └── .env                # REACT_APP_BACKEND_URL
+    └── .env                # VITE_DEV_PORT, VITE_BACKEND_URL
 ```
 
 ## Data Model (MongoDB)
 
 | Collection | Key Fields | Purpose |
 |------------|-----------|---------|
-| `projects` | id, name, original_file, transformed_file, lyrics, style, legal_scan_result, voice_clone_status | One document per uploaded track |
+| `projects` | id, name, original_file, lyrics, style, legal_scan, transform_status, stems_directory, midi_files, musicxml_files, morph_status, morph_params, morph_result, morph_directory, voice_sample_file, voice_clone_status, voice_clone_file | One document per uploaded track — every gateway checkpoint persisted (True Isolation) |
 | `user_styles` | id, name, description, sample_lyrics, text_samples, audio_sample_transcripts | Named lyric style presets |
 | `profiles` | id (`"default"`), corpus[], fingerprint, fingerprint_bias, llm_theme_summary | Global learned writing voice |
 | `status_checks` | id, client_name, timestamp | Health check log |
 
-## API Endpoints (34 total)
+## API Endpoints (36 routes)
 
 ### Core
 - `GET /api/` — health check
@@ -84,9 +93,14 @@ Transformusic/
 - `POST /api/projects/{id}/upload` — upload audio (MP3/WAV/FLAC/OGG)
 - `POST /api/projects/{id}/legal-scan` — AuDD.io fingerprint scan *(Gateway 01)*
 - `POST /api/projects/{id}/transform` — stem separation + MIDI *(Gateway 02)*
-- `GET /api/projects/{id}/transform-status` — poll transform progress
-- `GET /api/projects/{id}/download-stems` — download stems + MIDI as ZIP
-- `GET /api/projects/{id}/download-beat` — download instrumental
+- `GET /api/projects/{id}/transform-status` — poll transform progress (carries detected bpm/key)
+- `GET /api/projects/{id}/transcription` — vocal transcription text
+- `GET /api/projects/{id}/stem-audio/{stem}` — stream a stem for in-app playback
+- `GET /api/projects/{id}/download-stems` — download DAW package as ZIP
+- `GET /api/projects/{id}/download-beat` — download the Cleared Beat (morphed instrumental if GW03 complete, else deconstructed instrumental)
+- `POST /api/projects/{id}/morph` — trigger morph `{similarity_target?, key_target?, bpm_target?}` *(Gateway 03)*
+- `GET /api/projects/{id}/morph-status` — poll morph progress/result
+- `GET /api/projects/{id}/morph-preview` — stream the morphed instrumental
 - `POST /api/projects/{id}/generate-lyrics` — LLM lyric generation *(Gateway 04)*
 - `GET /api/projects/{id}/export` — export project JSON
 - `GET /api/projects/{id}/download-lyrics` — download lyrics as text
@@ -156,9 +170,13 @@ Fingerprints the user's lyric writing voice from a corpus. Produces a style prom
 | Blend | Defined + Learned at user-set weight |
 | Custom | Free-form prompt |
 
-## Frontend (`App.jsx`)
+## Frontend
 
-Single-file React SPA (~2,000 lines). Three views: **Home**, **Studio**, **Settings**.
+React 19 SPA (Vite 8). `App.jsx` is the shell: 3-pane layout (INPUT / FUSION MATRIX /
+SOVEREIGN OUTPUT), string state machine, cosmetic telemetry + spectrogram. Each gateway
+lives in `components/gateways/` wrapped in a `GatewayErrorBoundary`; all HTTP goes
+through `lib/apiClient.js` (fetch, 3 retries, 1s/2s/4s backoff on 5xx/429/network,
+sonner toasts). Dev proxy forwards `/api` to `VITE_BACKEND_URL`.
 
 State machine drives the 5-gateway flow:
 ```
@@ -167,10 +185,10 @@ idle → ingesting → gateway_01 → deconstructing → gateway_02
      → planting → gateway_05
 ```
 
-Each gateway has animated telemetry feed (status lines), spectrogram visualization, and a "PROCEED" button to advance.
+Processing phases are short fixed-timer telemetry animations; the real work is
+triggered and polled inside each gateway component (GW02/GW03/GW05 poll every 3s).
 
-No external state library — all useState/useRef local state.  
-Dark gradient theme (slate-900 → purple-900), neon green accent (`--neon: #00ff88`).
+Dark theme per STYLE.md, neon green accent (`--neon: #00ff88`), JetBrains Mono.
 
 ## Gateway Status
 
@@ -178,13 +196,35 @@ Dark gradient theme (slate-900 → purple-900), neon green accent (`--neon: #00f
 |---------|------|---------|----------|
 | 01 | Legal Diagnostic | Live (AuDD.io) | Live |
 | 02 | Deconstruction | **Live** (Demucs + Basic Pitch + music21) | **Live** |
-| 03 | Morph Engine | Not implemented | UI only (mock) |
-| 04 | Lyric Rebuild | **Live** (LLM + style engine) | **Live** |
-| 05 | Voice Clone | Partial (endpoints + F5-TTS code present) | Partial |
+| 03 | Morph Engine | **Live** (`morph_engine.py` — DSP morph + measured similarity) | **Live** (target slider, preview, re-morph) |
+| 04 | Lyric Rebuild | **Live** (LLM + style engine + structure modes) | **Live** |
+| 05 | Voice Clone | Live (TTS-server client); needs `VOICE_CLONE_URL` provisioned | **Live** (upload → clone → poll → download) |
+
+## Morph Engine (`morph_engine.py`)
+
+Gateway 03 — deterministic DSP per the Derivative-Origin rule (every output is a
+calculable operation on GW02's extracted stems; no generation):
+
+- **Plan**: similarity target S ∈ [0,79] → deviation D = 100−S → pitch +round(7·D/100)
+  semitones (≤7), tempo rate 1+0.15·D/100 clamped [0.80,1.25]. Explicit `key_target`
+  (signed circular semitone distance) or `bpm_target` override their axis.
+- **Apply**: per-channel `librosa.effects.time_stretch` then `pitch_shift` on
+  drums/bass/other (vocals never morphed; drums time-stretch only). MIDI: note
+  times ×(1/rate), non-drum pitches +n. Remix → `instrumental.wav` + lameenc MP3
+  in `uploads/{id}_morph/`.
+- **Measure**: tempo axis from full mixes (beat tracker), chroma+key axes from the
+  harmonic submix (bass+other) — drum transients dominate full-mix chroma and would
+  mask real key movement (measured cos 0.99 despite bass/other moving G→C).
+  `similarity_achieved = 100·(0.15·chroma + 0.50·key + 0.35·tempo)`, monotonic in the
+  target within a source (verified live: same track target 20→18% and 50→40%;
+  a different real track target 35→43% and 60→63%).
+- Status/claim/recovery semantics identical to the transform pipeline (atomic DB
+  claim, `_MORPH_PROGRESS` dict, stale-processing recovery, startup orphan reset).
 
 ## Known Issues / Next Work
 
-- Gateway 03 (beat morphing) has no backend — pitch/tempo/key reshape not implemented
-- Voice clone (Gateway 05) has server code but is untested end-to-end
-- MIDI conversion in `extract_stems_and_convert_to_midi()` runs synchronously in async context — should move to `asyncio.to_thread`
+- Key detection is major-only chroma argmax (no minor-mode profiling) — shared by
+  legal scan and morph; consistent on both sides of the similarity measurement
+- Voice clone has never completed a real run — needs a provisioned TTS server
 - No authentication — single global "default" profile
+- server.py is ~2100 lines on one router — split into modules planned
