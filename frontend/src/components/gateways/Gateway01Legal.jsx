@@ -105,7 +105,7 @@ const MOCK_LEGAL = {
 /**
  * Gateway 01 — Legal Diagnostic
  *
- * Displays the results of the AuDD.io legal scan for the uploaded audio file.
+ * Displays the results of the Shazam legal scan for the uploaded audio file.
  * Shows matched source, ISRC, label, release date, genre, BPM, key, and violation risk.
  * Provides a PROCEED button to advance to the next gateway and an EXIT button
  * to download the legal diagnostic report.
@@ -189,7 +189,7 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
         : 'CLEAR TO PROCEED. No registered match found in database.',
       '',
       '────────────────────────────────────────────────────────',
-      'Powered by AuDD.io audio recognition.',
+      'Powered by Shazam API v2 audio recognition.',
       'This report is generated for informational purposes only.',
       'It does not constitute legal advice.',
     ].filter(Boolean).join('\n')
@@ -212,7 +212,7 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
       <div style={{ fontFamily: 'JetBrains Mono', fontSize: '11px', lineHeight: 2, color: 'var(--text-terminal)' }}>
         {scanPending || scanning ? (
           <div style={{ color: 'var(--text-secondary)', fontSize: '10px' }}>
-            IDENTIFYING AUDIO... QUERYING AUDD.IO DATABASE...
+            IDENTIFYING AUDIO... QUERYING RECOGNITION DATABASE...
           </div>
         ) : scanError ? (
           <div style={{ color: 'var(--danger)', fontSize: '10px' }}>

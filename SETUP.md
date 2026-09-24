@@ -39,7 +39,7 @@ API docs at **http://localhost:8000/docs**
 | `CORS_ORIGINS` | `http://localhost:3200` | Allowed CORS origins (comma-separated) |
 | `LLM_BASE_URL` | `http://localhost:1234` | LM Studio / Ollama / any OpenAI-compatible LLM |
 | `LLM_MODEL` | *(empty = use loaded model)* | Model name to request |
-| `AUDD_API_KEY` | — | AuDD.io API key for legal scan (Gateway 01) |
+| `SHAZAM_API_KEY` | — | Shazam API v2 key for legal scan (Gateway 01) |
 | `DEMUCS_URL` | *(empty = local CPU)* | Remote Demucs GPU server URL (e.g. `http://100.119.105.73:8600`) |
 | `VOICE_CLONE_URL` | *(empty = local F5-TTS)* | Remote voice clone server URL (e.g. `http://100.119.105.73:8500`) |
 
@@ -90,7 +90,7 @@ Without it, Gateway 05 UI is fully wired but the clone trigger returns
 
 | Gateway | Name | Status |
 |---------|------|--------|
-| 01 | Legal Diagnostic | Live — AuDD.io fingerprint scan (requires `AUDD_API_KEY`) |
+| 01 | Legal Diagnostic | Live — Shazam API v2 recognition (requires `SHAZAM_API_KEY`) |
 | 02 | Deconstruction | **Live** — stem separation (Demucs) + MIDI (Basic Pitch) + MusicXML (music21) |
 | 03 | Morph Engine | **Live** — deterministic DSP morph (`morph_engine.py`): tempo/pitch from similarity target, key/BPM override, measured achieved similarity |
 | 04 | Lyric Rebuild | **Live** — LLM lyric generation, style presets/user styles/learned fingerprint, CADENCE vs FRESH structure modes |

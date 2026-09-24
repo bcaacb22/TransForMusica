@@ -4,7 +4,7 @@
 
 Transformusic is a 5-gateway beat deconstruction and lyric generation pipeline. Upload any audio (beat, instrumental, full track) and move it through:
 
-1. **Legal Diagnostic** — AuDD.io fingerprint scan, similarity score, violation risk
+1. **Legal Diagnostic** — Shazam API v2 recognition, violation risk, similarity score
 2. **Deconstruction** — Demucs stem separation → MIDI (Basic Pitch) → MusicXML (music21)
 3. **Morph Engine** — deterministic DSP reshaping: time-stretch + pitch-shift driven by a similarity target (or explicit key/BPM), with measured achieved similarity
 4. **Lyric Rebuild** — local LLM generation with style fingerprinting; CADENCE (keep original structure) vs FRESH (new structure) modes
@@ -21,7 +21,7 @@ Transformusic is a 5-gateway beat deconstruction and lyric generation pipeline. 
 | Morph DSP | librosa `time_stretch`/`pitch_shift`, pretty_midi (`morph_engine.py`) |
 | Notation | music21, pretty_midi, mido |
 | Transcription | faster-whisper (tiny, GPU or CPU) — runs on remote Demucs server |
-| Music Recognition | AuDD.io API (legal scan) |
+| Music Recognition | Shazam API v2 (legal scan) |
 | Voice Clone | XTTS-v2 or F5-TTS via standalone server (`xtts_server.py` / `f5tts_server.py`, port 8500) |
 | Style Engine | Custom heuristic + LLM hybrid (`style_engine.py`) |
 | Task Bounding | `task_manager.py` — global `asyncio.Semaphore(10)`, strong-ref background tasks |
@@ -51,7 +51,7 @@ Transformusic/
 │   ├── f5tts_server.py    # Standalone F5-TTS clone server (/health + /clone, :8500)
 │   ├── requirements-core.txt   # API-only deps
 │   ├── requirements-audio.txt  # Full audio pipeline deps
-│   ├── .env               # MongoDB, LLM, AuDD.io, Demucs/Voice URLs
+│   ├── .env               # MongoDB, LLM, Shazam, Demucs/Voice URLs
 │   ├── install.bat        # Windows venv + dep installer
 │   ├── tests/backend_test.py   # Live-server pytest suite (REACT_APP_BACKEND_URL)
 │   └── uploads/           # Runtime — audio files, stems, MIDI, morphs (gitignored)
@@ -91,7 +91,7 @@ Transformusic/
 - `GET /api/projects` — list
 - `GET /api/projects/{id}` — get
 - `POST /api/projects/{id}/upload` — upload audio (MP3/WAV/FLAC/OGG)
-- `POST /api/projects/{id}/legal-scan` — AuDD.io fingerprint scan *(Gateway 01)*
+- `POST /api/projects/{id}/legal-scan` — Shazam v2 recognition *(Gateway 01)*
 - `POST /api/projects/{id}/transform` — stem separation + MIDI *(Gateway 02)*
 - `GET /api/projects/{id}/transform-status` — poll transform progress (carries detected bpm/key)
 - `GET /api/projects/{id}/transcription` — vocal transcription text
@@ -136,7 +136,7 @@ Transformusic/
 |---------|-----------|---------|----------|
 | MongoDB | localhost:27017 | Database | Yes |
 | LM Studio / Ollama | localhost:1234 | Lyric LLM generation | Yes |
-| AuDD.io | api.audd.io | Music recognition (legal scan) | Gateway 01 |
+| Shazam API | shazam-api.com | Music recognition (legal scan) | Gateway 01 |
 | Demucs server | `DEMUCS_URL`:8600 | GPU stem separation | No (falls back to CPU) |
 | Whisper (via Demucs server) | `DEMUCS_URL`/transcribe | Audio transcription | No (runs local on fallback) |
 | Voice Clone server | `VOICE_CLONE_URL`:8500 | F5-TTS voice cloning | Gateway 05 only |
@@ -194,7 +194,7 @@ Dark theme per STYLE.md, neon green accent (`--neon: #00ff88`), JetBrains Mono.
 
 | Gateway | Name | Backend | Frontend |
 |---------|------|---------|----------|
-| 01 | Legal Diagnostic | Live (AuDD.io) | Live |
+| 01 | Legal Diagnostic | Live (Shazam API v2) | Live |
 | 02 | Deconstruction | **Live** (Demucs + Basic Pitch + music21) | **Live** |
 | 03 | Morph Engine | **Live** (`morph_engine.py` — DSP morph + measured similarity) | **Live** (target slider, preview, re-morph) |
 | 04 | Lyric Rebuild | **Live** (LLM + style engine + structure modes) | **Live** |

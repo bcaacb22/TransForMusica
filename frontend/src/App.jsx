@@ -418,8 +418,14 @@ export default function App() {
     } else {
       setFile(MOCK_FILE)
     }
-    startProcessing('ingesting')
-    if (!rawFile) return
+    if (!rawFile) {
+      startProcessing('ingesting')
+      return
+    }
+    // Create the project and upload BEFORE advancing the state machine. If the
+    // backend is unreachable the user gets the error banner on the idle screen
+    // and can retry — previously the pipeline advanced to Gateway 01 first and
+    // left a "scanning" view running against a dead connection.
     try {
       const proj = await apiPost('/api/projects', { name: rawFile.name })
       setProjectId(proj.id)
@@ -428,8 +434,10 @@ export default function App() {
       form.append('file', rawFile)
       await apiPost(`/api/projects/${proj.id}/upload`, form)
     } catch (e) {
-      setApiError(`Upload: ${e.message}`)
+      setApiError(`Upload: ${e.message} — backend may be down. Fix it and retry.`)
+      return
     }
+    startProcessing('ingesting')
   }, [startProcessing])
 
   const handleGatewayComplete = useCallback(() => {

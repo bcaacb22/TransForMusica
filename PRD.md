@@ -23,7 +23,7 @@ Musicians need a tool that takes any uploaded instrumental and transforms it int
 
 - [x] Project CRUD (create, list, get, delete)
 - [x] Audio upload (MP3/WAV/FLAC/OGG, multipart)
-- [x] Gateway 01: Legal Diagnostic (AuDD.io fingerprint scan)
+- [x] Gateway 01: Legal Diagnostic (Shazam API v2 recognition)
 - [x] Gateway 02: Deconstruction (Demucs stems + Basic Pitch MIDI + music21 MusicXML)
 - [x] Gateway 04: Lyric Rebuild (LLM generation with 5 style modes)
 - [x] Style Engine (heuristic fingerprint + LLM theme pass + bias slider)
@@ -64,7 +64,7 @@ Musicians need a tool that takes any uploaded instrumental and transforms it int
 | Audio-to-MIDI | Basic Pitch (Spotify) |
 | Notation | music21, pretty_midi, mido |
 | Transcription | faster-whisper |
-| Music Recognition | AuDD.io API |
+| Music Recognition | Shazam API v2 |
 | Voice Clone | F5-TTS / XTTS |
 | Frontend | React 19, Vite, Tailwind, shadcn/ui |
 

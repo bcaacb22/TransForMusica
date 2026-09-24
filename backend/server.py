@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 import shutil
 import asyncio
 import httpx
-import tempfile
+import json
+import time
 
 # Initialize basic logging early so import-time warnings go to the console
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -202,6 +203,17 @@ class OllamaModelInfo(BaseModel):
     quantization_level: Optional[str] = ""
 
 VOICE_CLONE_URL = os.environ.get("VOICE_CLONE_URL", "").rstrip("/")
+
+# Shazam API v2 — Gateway 01 music recognition (replaces AuDD.io)
+SHAZAM_API_KEY = os.environ.get("SHAZAM_API_KEY", "")
+SHAZAM_BASE_URL = os.environ.get("SHAZAM_BASE_URL", "https://shazam-api.com").rstrip("/")
+# Poll budget for a recognition: submit returns a uuid, results arrive async.
+SHAZAM_POLL_INTERVAL_S = 2.5
+SHAZAM_POLL_TIMEOUT_S = 120.0
+
+# AcoustID (Chromaprint) — fallback recognition when Shazam finds no match
+ACOUSTID_API_KEY = os.environ.get("ACOUSTID_API_KEY", "")
+FPCALC_PATH = os.environ.get("FPCALC", str(ROOT_DIR / "fpcalc.exe"))
 
 # Default Ollama config (can be overridden per-request or via env)
 DEFAULT_LLM_BASE_URL = os.environ.get('LLM_BASE_URL', os.environ.get('OLLAMA_BASE_URL', 'http://localhost:1234'))
@@ -781,7 +793,80 @@ async def upload_file(project_id: str, file: UploadFile = File(...)):
     return {"message": "File uploaded successfully", "filename": filename}
 
 
-# Legal Scan — AuDD.io recognition
+# Legal Scan — Shazam API v2 recognition
+async def _shazam_recognize(file_path: Path) -> dict:
+    """Submit audio to Shazam v2 /recognize and poll /results until terminal.
+
+    Returns {'status': 'success'|'no_matches'|'failed', 'results': [...],
+    'code': str|None, 'error': str|None}. Raises on HTTP/transport errors so the
+    caller maps them to the UNKNOWN risk path.
+    """
+    headers = {"Authorization": f"Bearer {SHAZAM_API_KEY}"}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+        with open(file_path, "rb") as f:
+            resp = await client.post(
+                f"{SHAZAM_BASE_URL}/api/v2/recognize",
+                headers=headers,
+                files={"file": (file_path.name, f, "audio/mpeg")},
+                data={"metadata": json.dumps({"project": "transformusic"})},
+            )
+        resp.raise_for_status()
+        submitted = resp.json()
+        results_url = submitted.get("resultsUrl") or f"/api/v2/results/{submitted['uuid']}"
+
+        deadline = time.monotonic() + SHAZAM_POLL_TIMEOUT_S
+        while time.monotonic() < deadline:
+            await asyncio.sleep(SHAZAM_POLL_INTERVAL_S)
+            r = await client.get(f"{SHAZAM_BASE_URL}{results_url}", headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            status = data.get("status")
+            if status == "processing":
+                continue
+            if status == "success":
+                return {"status": "success", "results": data.get("results", []),
+                        "code": None, "error": None}
+            if status == "no_matches":
+                return {"status": "no_matches", "results": [], "code": None, "error": None}
+            return {"status": "failed", "results": [],
+                    "code": data.get("code"), "error": data.get("error")}
+        return {"status": "failed", "results": [], "code": "TIMEOUT",
+                "error": f"Recognition still processing after {int(SHAZAM_POLL_TIMEOUT_S)}s"}
+
+
+def _acoustid_recognize_sync(file_path: Path) -> dict:
+    """Fingerprint with fpcalc + query AcoustID. Returns the same shape as
+    _shazam_recognize: {'status': 'success'|'no_matches'|'failed', ...}."""
+    import acoustid
+    os.environ["FPCALC"] = FPCALC_PATH
+    duration, fingerprint = acoustid.fingerprint_file(str(file_path))
+    results = acoustid.lookup(ACOUSTID_API_KEY, fingerprint, duration)
+    if results.get("status") != "ok":
+        return {"status": "failed", "results": [], "code": "API_ERROR",
+                "error": str(results.get("error", results))}
+    matches = results.get("results", [])
+    if not matches:
+        return {"status": "no_matches", "results": [], "code": None, "error": None}
+    # Take the best-scoring recording
+    best = max(matches, key=lambda r: r.get("score", 0))
+    recordings = best.get("recordings", [])
+    if not recordings:
+        return {"status": "no_matches", "results": [], "code": None, "error": None}
+    rec = recordings[0]
+    artists = ", ".join(a.get("name", "") for a in rec.get("artists", []))
+    return {"status": "success", "results": [{
+        "title": rec.get("title"),
+        "artist": artists or None,
+        "album": None,
+        "releaseDate": None,
+        "timecode": None,
+        "isrc": rec.get("isrcs", [None])[0] if rec.get("isrcs") else None,
+        "genre": None,
+        "artwork": None,
+        "links": {},
+    }], "code": None, "error": None}
+
+
 @api_router.post("/projects/{project_id}/legal-scan")
 async def legal_scan(project_id: str):
     project = await db.projects.find_one({"id": project_id})
@@ -796,75 +881,49 @@ async def legal_scan(project_id: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Audio file not found on disk")
 
-    audd_key = os.environ.get("AUDD_API_KEY", "")
-
     try:
-        # AuDD.io recognition — send first 30s clip
+        # Shazam v2 recognition — full file, async submit + poll
         match_title = match_artist = match_album = match_label = None
         match_release_date = match_timecode = match_isrc = match_genre = None
         match_spotify_url = match_apple_music_url = match_album_art = match_song_link = None
-        audd_error = None
+        scan_error = None
 
-        if audd_key:
-            clip_path = None
+        if SHAZAM_API_KEY:
             try:
-                clip_fd, clip_path = tempfile.mkstemp(suffix=".mp3")
-                os.close(clip_fd)
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-i", str(file_path), "-t", "30", "-acodec", "libmp3lame", "-q:a", "5", "-y", clip_path,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-                if proc.returncode != 0:
-                    raise RuntimeError(f"ffmpeg failed rc={proc.returncode}: {stderr.decode(errors='replace')[-300:]}")
-
-                async with httpx.AsyncClient(timeout=60) as client_http:
-                    with open(clip_path, "rb") as clip_f:
-                        resp = await client_http.post(
-                            "https://api.audd.io/",
-                            data={"api_token": audd_key, "return": "apple_music,spotify"},
-                            files={"file": (Path(file_path).name, clip_f, "audio/mpeg")},
-                        )
-                    resp.raise_for_status()
-                    adata = resp.json()
-
-                if adata.get("status") == "error":
-                    err = adata.get("error") or {}
-                    audd_error = f"AuDD error {err.get('error_code', '?')}: {err.get('message', str(adata))}"
-                elif adata.get("status") == "success" and adata.get("result"):
-                    r = adata["result"]
+                rec = await _shazam_recognize(file_path)
+                if rec["status"] == "success" and rec["results"]:
+                    r = rec["results"][0]
                     match_title = r.get("title")
                     match_artist = r.get("artist")
                     match_album = r.get("album")
-                    match_label = r.get("label")
-                    match_release_date = r.get("release_date")
+                    match_release_date = r.get("releaseDate")
                     match_timecode = r.get("timecode")
-                    match_song_link = r.get("song_link")
-
-                    am = r.get("apple_music") or {}
-                    if am:
-                        match_isrc = am.get("isrc")
-                        genres = am.get("genreNames", [])
-                        match_genre = genres[0] if genres else None
-                        match_apple_music_url = am.get("url")
-                        art = am.get("artwork") or {}
-                        art_url = art.get("url", "")
-                        if art_url:
-                            match_album_art = art_url.replace("{w}", "300").replace("{h}", "300")
-
-                    sp = r.get("spotify") or {}
-                    if sp:
-                        match_spotify_url = sp.get("external_urls", {}).get("spotify")
-                        if not match_isrc:
-                            match_isrc = sp.get("external_ids", {}).get("isrc")
+                    match_isrc = r.get("isrc")
+                    match_genre = r.get("genre")
+                    match_album_art = r.get("artwork")
+                    links = r.get("links") or {}
+                    match_spotify_url = links.get("spotify")
+                    match_apple_music_url = links.get("appleMusic")
+                    match_song_link = links.get("shazam")
+                elif rec["status"] == "failed":
+                    scan_error = f"Shazam {rec['code']}: {rec['error']}"
             except Exception as e:
-                audd_error = str(e)
-            finally:
-                if clip_path:
-                    try:
-                        os.unlink(clip_path)
-                    except Exception:
-                        pass
+                scan_error = str(e)
+        else:
+            scan_error = "no SHAZAM_API_KEY configured"
+
+        # AcoustID fallback — only when Shazam didn't find a match
+        if not match_title and ACOUSTID_API_KEY:
+            try:
+                rec2 = await asyncio.to_thread(_acoustid_recognize_sync, file_path)
+                if rec2["status"] == "success" and rec2["results"]:
+                    r = rec2["results"][0]
+                    match_title = r.get("title")
+                    match_artist = r.get("artist")
+                    match_isrc = r.get("isrc")
+                    scan_error = None  # clear any Shazam error — we got a match
+            except Exception:
+                pass  # AcoustID failure is silent — Shazam result stands
 
         # Get duration via ffprobe
         duration = None
@@ -898,7 +957,7 @@ async def legal_scan(project_id: str):
         except Exception:
             pass
 
-        # Lyrical match via lyrics.ovh — only when AuDD identified the track
+        # Lyrical match via lyrics.ovh — only when recognition identified the track
         if match_title and match_artist and transcribed:
             try:
                 import urllib.parse
@@ -915,14 +974,13 @@ async def legal_scan(project_id: str):
                 pass
 
         # Determine violation risk based on scan outcome
-        if not audd_key:
-            # No API key configured — scan could not be performed
+        if not SHAZAM_API_KEY:
             violation_risk = "UNAVAILABLE"
-            matched_source = "SCAN UNAVAILABLE — no AuDD API key configured"
+            matched_source = "SCAN UNAVAILABLE — no Shazam API key configured"
         elif match_title:
             violation_risk = "HIGH"
             matched_source = f"{match_title} — {match_artist}" if match_artist else match_title
-        elif audd_error:
+        elif scan_error:
             violation_risk = "UNKNOWN"
             matched_source = "LOOKUP UNAVAILABLE"
         else:
@@ -949,7 +1007,7 @@ async def legal_scan(project_id: str):
             "songLink": match_song_link,
             "album": match_album,
             "original_transcription": transcribed,
-            "auddError": audd_error,
+            "scanError": scan_error,
         }
 
         update_fields = {"legal_scan": result, "updated_at": datetime.now(timezone.utc).isoformat()}
@@ -985,9 +1043,8 @@ async def legal_scan(project_id: str):
             "albumArt": None,
             "timecode": None,
             "songLink": None,
-            "album": None,
             "original_transcription": "",
-            "auddError": f"Unexpected error: {str(e)}",
+            "scanError": f"Unexpected error: {str(e)}",
         }
 
 
