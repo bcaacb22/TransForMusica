@@ -156,15 +156,41 @@ function BtnHollow({ children, onClick, disabled }) {
   )
 }
 
+const PROVIDERS = [
+  { id: 'ollama',    label: 'OLLAMA (LOCAL)',    url: 'http://localhost:11434' },
+  { id: 'lmstudio',  label: 'LM STUDIO (LOCAL)', url: 'http://localhost:1234' },
+  { id: 'custom',    label: 'CUSTOM (OPENAI-COMPATIBLE)', url: '' },
+]
+
 function LmSettings({ settings, onChange }) {
   const update = (key, val) => {
     const next = { ...settings, [key]: val }
     onChange(next)
     localStorage.setItem('tmLmSettings', JSON.stringify(next))
   }
+  const selectProvider = (id) => {
+    const preset = PROVIDERS.find(p => p.id === id)
+    update('provider', id)
+    if (preset && preset.url) update('url', preset.url)
+  }
+  const provider = settings.provider || 'lmstudio'
+  const needsKey = provider === 'custom'
+
+  const inputStyle = {
+    fontFamily: 'JetBrains Mono', fontSize: '11px',
+    background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)',
+    color: 'var(--text-primary)', padding: '7px 10px', width: '100%',
+    outline: 'none', boxSizing: 'border-box',
+  }
+
   return (
-    <ControlBlock label="AI SETTINGS — LM STUDIO">
+    <ControlBlock label="AI SETTINGS — LYRIC ENGINE">
       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+        <ChoiceRow
+          options={PROVIDERS.map(p => ({ label: p.label, value: p.id }))}
+          selected={provider}
+          onSelect={selectProvider}
+        />
         <div>
           <div style={{ fontFamily: 'JetBrains Mono', fontSize: '9px', color: 'var(--text-secondary)', letterSpacing: '0.1em', marginBottom: '5px' }}>
             BASE URL
@@ -174,12 +200,7 @@ function LmSettings({ settings, onChange }) {
             value={settings.url || ''}
             placeholder="http://localhost:1234"
             onChange={e => update('url', e.target.value)}
-            style={{
-              fontFamily: 'JetBrains Mono', fontSize: '11px',
-              background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)',
-              color: 'var(--text-primary)', padding: '7px 10px', width: '100%',
-              outline: 'none',
-            }}
+            style={inputStyle}
           />
         </div>
         <div>
@@ -191,14 +212,23 @@ function LmSettings({ settings, onChange }) {
             value={settings.model || ''}
             placeholder="qwen3-14b"
             onChange={e => update('model', e.target.value)}
-            style={{
-              fontFamily: 'JetBrains Mono', fontSize: '11px',
-              background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)',
-              color: 'var(--text-primary)', padding: '7px 10px', width: '100%',
-              outline: 'none',
-            }}
+            style={inputStyle}
           />
         </div>
+        {needsKey && (
+          <div>
+            <div style={{ fontFamily: 'JetBrains Mono', fontSize: '9px', color: 'var(--text-secondary)', letterSpacing: '0.1em', marginBottom: '5px' }}>
+              API KEY (hosted providers only)
+            </div>
+            <input
+              type="password"
+              value={settings.apiKey || ''}
+              placeholder="sk-..."
+              onChange={e => update('apiKey', e.target.value)}
+              style={inputStyle}
+            />
+          </div>
+        )}
       </div>
     </ControlBlock>
   )
@@ -234,6 +264,7 @@ export default function Gateway04LyricRebuild({ projectId, project, onComplete }
         structure_mode: structureMode.toLowerCase(),
         ollama_base_url: lmSettings.url || 'http://localhost:1234',
         ollama_model: lmSettings.model || '',
+        llm_api_key: lmSettings.apiKey || '',
       })
       setLyricsResult(result.lyrics)
     } catch (e) {
@@ -377,8 +408,8 @@ export default function Gateway04LyricRebuild({ projectId, project, onComplete }
           </div>
         </div>
 
-        {/* Lyrics display */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', flex: 1, minHeight: 0 }}>
+        {/* Lyrics display — single scroll container (outer), no nested scroller */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <div style={{
             fontFamily: 'JetBrains Mono', fontSize: '9px',
             color: 'var(--neon)', letterSpacing: '0.15em',
@@ -391,21 +422,20 @@ export default function Gateway04LyricRebuild({ projectId, project, onComplete }
             fontFamily: 'JetBrains Mono', fontSize: '10px',
             color: 'var(--text-secondary)',
           }}>
-            STYLE: {MOCK_GATEWAY_04.style} · MODE: {MOCK_GATEWAY_04.structureMode}
+            STYLE: {lyricMode} · MODE: {structureMode === 'PLACEHOLDER' ? 'PLACEHOLDER CADENCE' : 'FRESH'}
+            {!lyricsResult && '  ·  (SAMPLE — PRESS GENERATE FOR YOUR LYRICS)'}
           </div>
           <div style={{
-            flex: 1,
-            overflow: 'auto',
-            border: '1px solid rgba(255,255,255,0.08)',
+            border: `1px solid ${lyricsResult ? 'rgba(0,255,136,0.2)' : 'rgba(255,255,255,0.08)'}`,
             padding: '14px',
             fontFamily: 'Outfit',
             fontWeight: 300,
             fontSize: '12px',
             lineHeight: 1.8,
-            color: 'rgba(255,255,255,0.85)',
+            color: lyricsResult ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.4)',
             whiteSpace: 'pre-line',
           }}>
-            {lyrics}
+            {lyricsResult || 'No lyrics generated yet.\n\nChoose a mode and structure above, then press GENERATE LYRICS.\n\n(The text shown here before generation is a sample placeholder — it is not your output.)'}
           </div>
         </div>
       </div>
@@ -416,12 +446,12 @@ export default function Gateway04LyricRebuild({ projectId, project, onComplete }
         borderTop: '1px solid var(--border-dim)',
         display: 'flex', flexDirection: 'column', gap: '8px',
       }}>
-        <BtnPrimary onClick={handleProceed} disabled={generating}>
-          {'> PROCEED TO RE-PLANT'}
-        </BtnPrimary>
         <BtnHollow onClick={!downloading ? handleDownloadLyrics : undefined} disabled={downloading || generating}>
-          {downloading ? '// PACKAGING...' : 'EXIT: EXPORT LYRIC CANVAS'}
+          {downloading ? '// PACKAGING...' : 'EXPORT LYRIC CANVAS'}
         </BtnHollow>
+        <BtnPrimary onClick={handleProceed} disabled={generating}>
+          {'> PROCEED'}
+        </BtnPrimary>
       </div>
     </div>
   )

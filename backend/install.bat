@@ -1,4 +1,5 @@
 @echo off
+setlocal EnableDelayedExpansion
 echo === Transformusic Backend Installer ===
 echo.
 
@@ -27,8 +28,41 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+REM ---------------------------------------------------------------------------
+REM PyTorch backend selection (affects demucs stem separation speed)
+REM   - Auto: uses NVIDIA GPU if one is detected, otherwise CPU
+REM   - Override: set TORCH_BACKEND=cuda  or  TORCH_BACKEND=cpu  before running
+REM ---------------------------------------------------------------------------
 echo.
-echo Installing audio dependencies...
+echo === PyTorch backend selection ===
+set "TORCH_CHOICE="
+if defined TORCH_BACKEND (
+    set "TORCH_CHOICE=!TORCH_BACKEND!"
+    echo Using override TORCH_BACKEND=!TORCH_BACKEND!
+) else (
+    nvidia-smi >nul 2>&1
+    if !errorlevel! equ 0 (
+        set "TORCH_CHOICE=cuda"
+    ) else (
+        set "TORCH_CHOICE=cpu"
+    )
+)
+
+if "!TORCH_CHOICE!"=="cuda" (
+    echo Detected NVIDIA GPU - installing CUDA-enabled PyTorch (fast demucs).
+    echo To force CPU instead, re-run with:  set TORCH_BACKEND=cpu
+    pip install torch --index-url https://download.pytorch.org/whl/cu126
+) else (
+    echo No NVIDIA GPU detected - installing CPU-only PyTorch.
+    echo If you DO have an NVIDIA GPU and want it used, re-run with:  set TORCH_BACKEND=cuda
+    pip install torch --index-url https://download.pytorch.org/whl/cpu
+)
+if %errorlevel% neq 0 (
+    echo WARNING: PyTorch install failed. Demucs stem separation may not work.
+)
+
+echo.
+echo Installing audio dependencies (demucs, librosa, basic-pitch support)...
 pip install -r requirements-audio.txt
 if %errorlevel% neq 0 (
     echo ERROR: Audio install failed
@@ -37,7 +71,6 @@ if %errorlevel% neq 0 (
 
 echo.
 echo Installing basic-pitch (ONNX backend on Windows/Python 3.11)...
-echo Installing basic-pitch runtime deps (avoids heavy TensorFlow)...
 pip install onnxruntime "mir_eval>=0.6" "resampy>=0.2.2,<0.4.3" typing-extensions
 if %errorlevel% neq 0 (
     echo WARNING: basic-pitch deps failed. Transform/MIDI feature will be stubbed.
@@ -51,5 +84,7 @@ if %errorlevel% neq 0 (
 :done
 echo.
 echo === Install complete ===
+echo PyTorch backend: !TORCH_CHOICE!
 echo Run: .venv\Scripts\activate
 echo Then: python run_app.py
+endlocal

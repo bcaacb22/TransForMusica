@@ -6,3 +6,7 @@ pretty_midi>=0.2.10
 music21>=9.7.0
 mido>=1.3.3
 faster-whisper>=1.2.0
+demucs>=4.0.1
+# torch (demucs dep) demands setuptools>=77, but setuptools 81+ no longer ships
+# pkg_resources, which basic-pitch still imports. Keep the window both accept.
+setuptools>=77.0.3,<81

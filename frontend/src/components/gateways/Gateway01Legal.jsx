@@ -270,21 +270,21 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
         </div>
       )}
 
-      {/* Action buttons */}
+      {/* Action buttons — the deliverable first, then proceed */}
       <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '8px' }}>
+        <BtnHollow
+          onClick={handleDownloadReport}
+          small
+          disabled={downloading || scanPending || scanning}
+        >
+          {downloading ? '// PACKAGING...' : 'DOWNLOAD LEGAL REPORT'}
+        </BtnHollow>
         <BtnPrimary
           onClick={onComplete}
           disabled={scanPending || scanning}
         >
           {scanPending || scanning ? '// SCANNING...' : '> PROCEED TO DECONSTRUCTION'}
         </BtnPrimary>
-        <BtnHollow
-          onClick={handleDownloadReport}
-          small
-          disabled={downloading || scanPending || scanning}
-        >
-          {downloading ? '// PACKAGING...' : 'EXIT: DOWNLOAD LEGAL REPORT'}
-        </BtnHollow>
       </div>
 
       {/* Error display */}

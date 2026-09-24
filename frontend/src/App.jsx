@@ -4,8 +4,8 @@ import { GatewayErrorBoundary } from './components/ErrorBoundary'
 import Gateway01Legal from './components/gateways/Gateway01Legal'
 import Gateway02Deconstruction from './components/gateways/Gateway02Deconstruction'
 import Gateway04LyricRebuild from './components/gateways/Gateway04LyricRebuild'
-import Gateway05VoiceClone from './components/gateways/Gateway05VoiceClone'
-import { apiPost } from './lib/apiClient'
+import { apiPost, apiGetBlob, triggerDownload } from './lib/apiClient'
+import AudioPlayer from './components/AudioPlayer'
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
 
@@ -488,7 +488,24 @@ function ErrorBanner({ error, onDismiss }) {
 
 // ─── Gateway 03 mock (not yet implemented as separate component) ──────────────
 
-function Gateway03Mock({ onComplete }) {
+function Gateway03Mock({ projectId, onComplete }) {
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState(null)
+
+  const handleExportBeat = useCallback(async () => {
+    if (!projectId) return
+    setExportError(null)
+    setExporting(true)
+    try {
+      const blob = await apiGetBlob(`/api/projects/${projectId}/download-beat`)
+      triggerDownload(blob, 'CLEARED_BEAT.mp3')
+    } catch (e) {
+      setExportError(`Export: ${e.message}`)
+    } finally {
+      setExporting(false)
+    }
+  }, [projectId])
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       <div style={{ flex: 1, padding: '18px', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '14px' }}>
@@ -521,8 +538,15 @@ function Gateway03Mock({ onComplete }) {
         </div>
       </div>
       <div style={{ padding: '14px 18px', borderTop: '1px solid var(--border-dim)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        {exportError && (
+          <div style={{ fontFamily: 'JetBrains Mono', fontSize: '9px', color: 'var(--danger)' }}>
+            // {exportError}
+          </div>
+        )}
+        <BtnHollow onClick={!exporting ? handleExportBeat : undefined} disabled={exporting}>
+          {exporting ? '// PACKAGING...' : 'DOWNLOAD CLEARED BEAT'}
+        </BtnHollow>
         <BtnPrimary onClick={onComplete}>{'>'}  PROCEED TO LYRIC REBUILD</BtnPrimary>
-        <BtnHollow>EXIT: EXPORT CLEARED BEAT</BtnHollow>
       </div>
     </div>
   )
@@ -583,8 +607,8 @@ export default function App() {
     if (state === 'gateway_01') startProcessing('deconstructing')
     else if (state === 'gateway_02') startProcessing('morphing')
     else if (state === 'gateway_03') startProcessing('rebuilding_lyrics')
+    // Gateway 05 (voice clone) is deferred — proceed from 04 lands on the deferred note.
     else if (state === 'gateway_04') startProcessing('planting')
-    else if (state === 'gateway_05') { /* final gateway — no next step */ }
   }, [state, startProcessing])
 
   const handleReset = useCallback(() => {
@@ -699,6 +723,12 @@ export default function App() {
                 <div><span style={{ color: 'var(--text-secondary)' }}>SIZE //</span> {file.size}</div>
               </div>
             )}
+            {phase >= 2 && projectId && project?.original_file && (
+              <AudioPlayer
+                src={`/api/files/${project.original_file}`}
+                label="ORIGINAL"
+              />
+            )}
           </div>
         </div>
 
@@ -757,7 +787,7 @@ export default function App() {
             )}
             {phase === 3 && state === 'gateway_03' && (
               <GatewayErrorBoundary>
-                <Gateway03Mock onComplete={handleGatewayComplete} />
+                <Gateway03Mock projectId={projectId} onComplete={handleGatewayComplete} />
               </GatewayErrorBoundary>
             )}
             {phase === 3 && state === 'gateway_04' && (
@@ -770,13 +800,14 @@ export default function App() {
               </GatewayErrorBoundary>
             )}
             {phase === 3 && state === 'gateway_05' && (
-              <GatewayErrorBoundary>
-                <Gateway05VoiceClone
-                  projectId={projectId}
-                  project={project}
-                  onComplete={handleGatewayComplete}
-                />
-              </GatewayErrorBoundary>
+              <div style={{ padding: '18px', fontFamily: 'JetBrains Mono', fontSize: '11px', lineHeight: 2, color: 'var(--text-secondary)' }}>
+                <div style={{ color: 'var(--neon)', fontSize: '9px', letterSpacing: '0.15em', marginBottom: '12px' }}>
+                  // GATEWAY 05 — VOICE CLONE
+                </div>
+                DEFERRED IN THIS BUILD.<br />
+                Voice cloning (F5-TTS) is not wired into this release.<br />
+                Your cleared beat and lyric canvas from Gateways 02–04 are the final outputs.
+              </div>
             )}
           </div>
         </div>

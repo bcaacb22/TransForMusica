@@ -118,7 +118,8 @@ class Project(BaseModel):
     midi_files: Optional[List[str]] = Field(default_factory=list)
     musicxml_files: Optional[List[str]] = Field(default_factory=list)
     main_midi: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    transcription_file: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda:datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class ProjectCreate(BaseModel):
@@ -147,6 +148,7 @@ class LyricsRequest(BaseModel):
     user_style_id: Optional[str] = None  # when style == 'defined' or 'blend'
     ollama_base_url: Optional[str] = None
     ollama_model: Optional[str] = None
+    llm_api_key: Optional[str] = None  # only needed for hosted OpenAI-compatible providers
     learned_bias: Optional[float] = 0.5  # 0 = heuristic, 1 = LLM-theme
     blend_weight: Optional[float] = 0.5  # 0 = learned only, 1 = defined only (blend mode)
     use_llm_theme: Optional[bool] = True  # if True and learned, run Ollama theme pass
@@ -179,6 +181,7 @@ class FingerprintComputeRequest(BaseModel):
     use_llm_theme: bool = True
     ollama_base_url: Optional[str] = None
     ollama_model: Optional[str] = None
+    llm_api_key: Optional[str] = None
     bias: Optional[float] = None
 
 class TranscribeResponse(BaseModel):
@@ -188,6 +191,7 @@ class TranscribeResponse(BaseModel):
 
 class OllamaTestRequest(BaseModel):
     base_url: str
+    api_key: Optional[str] = None
 
 class OllamaModelInfo(BaseModel):
     name: str
@@ -203,22 +207,24 @@ DEFAULT_LLM_MODEL = os.environ.get('LLM_MODEL', os.environ.get('OLLAMA_MODEL', '
 DEFAULT_OLLAMA_BASE_URL = DEFAULT_LLM_BASE_URL
 DEFAULT_OLLAMA_MODEL = DEFAULT_LLM_MODEL
 
-async def ollama_list_models(base_url: str) -> List[Dict[str, Any]]:
+async def ollama_list_models(base_url: str, api_key: str = "") -> List[Dict[str, Any]]:
     base = base_url.rstrip('/')
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
-        resp = await client.get(f"{base}/v1/models")
+        resp = await client.get(f"{base}/v1/models", headers=headers)
         resp.raise_for_status()
         data = resp.json()
         return [{"name": m.get("id", "unknown"), "size": 0, "details": {}} for m in data.get("data", [])]
 
-async def ollama_generate(base_url: str, model: str, prompt: str, system: str = "", temperature: float = 0.8) -> str:
+async def ollama_generate(base_url: str, model: str, prompt: str, system: str = "", temperature: float = 0.8, api_key: str = "") -> str:
     base = base_url.rstrip('/')
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     async with httpx.AsyncClient(timeout=httpx.Timeout(900.0, connect=10.0)) as client:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        resp = await client.post(f"{base}/v1/chat/completions", json={
+        resp = await client.post(f"{base}/v1/chat/completions", headers=headers, json={
             "model": model, "messages": messages, "temperature": temperature,
             "max_tokens": 2048,
             "stream": False, "enable_thinking": False,
@@ -301,7 +307,49 @@ async def add_to_profile_corpus(text: str, source: str = 'generated', title: Opt
 
 
 # Advanced Music Analysis Functions
-def extract_stems_and_convert_to_midi(audio_path, output_dir):
+def _encode_mp3(wav_path: Path, mp3_path: Path, bitrate: int = 320):
+    """Encode a wav stem to mp3 with lameenc (ships as a demucs dependency)."""
+    import soundfile as _sf
+    import lameenc
+    pcm, sr = _sf.read(str(wav_path), dtype="int16", always_2d=True)
+    encoder = lameenc.Encoder()
+    encoder.set_bit_rate(bitrate)
+    encoder.set_in_sample_rate(sr)
+    encoder.set_channels(pcm.shape[1])
+    encoder.set_quality(2)
+    encoder.silence()
+    mp3 = encoder.encode(pcm.tobytes()) + encoder.flush()
+    mp3_path.write_bytes(mp3)
+
+
+def _mix_instrumental(output_dir: Path, out_path: Path):
+    """Sum the non-vocal stems into a single instrumental wav (the beat without vocals)."""
+    import soundfile as _sf
+    tracks, sr = [], None
+    for name in ["drums", "bass", "other"]:
+        p = output_dir / f"{name}.wav"
+        if p.exists():
+            data, rate = _sf.read(str(p), dtype="float32", always_2d=True)
+            tracks.append(data)
+            sr = rate
+    if not tracks:
+        return None
+    frames = max(t.shape[0] for t in tracks)
+    mixed = np.zeros((frames, tracks[0].shape[1]), dtype=np.float32)
+    for t in tracks:
+        mixed[:t.shape[0]] += t
+    _sf.write(str(out_path), mixed, sr)
+    return out_path
+
+
+def extract_stems_and_convert_to_midi(audio_path, output_dir, progress_cb=None):
+    def prog(stage, pct, detail=""):
+        if progress_cb:
+            try:
+                progress_cb(stage, pct, detail)
+            except Exception:
+                pass
+
     try:
         import subprocess, sys
         logger.info(f"Starting audio-to-stems conversion for: {audio_path}")
@@ -310,11 +358,18 @@ def extract_stems_and_convert_to_midi(audio_path, output_dir):
         output_dir.mkdir(exist_ok=True)
 
         # 1. Full-song MIDI via Basic Pitch
+        prog("basic_pitch", 5, "Transcribing full track to MIDI")
         logger.info("Converting full audio to MIDI via Basic Pitch...")
+        if not HAS_BASICPITCH:
+            raise RuntimeError(
+                "basic-pitch is not importable in this environment — "
+                "see the basic_pitch import warning at startup"
+            )
         model_output, midi_data, note_events = predict(audio_path)
         main_midi_file = output_dir / "full_song.mid"
         midi_data.write(str(main_midi_file))
         logger.info(f"Saved full MIDI: {main_midi_file}")
+        prog("demucs", 15, "Neural stem separation starting")
 
         # 2. Neural stem separation via Demucs (GPU server or local CPU fallback)
         logger.info("Running Demucs stem separation...")
@@ -348,9 +403,11 @@ def extract_stems_and_convert_to_midi(audio_path, output_dir):
 
         if use_local:
             logger.info("No DEMUCS_URL set — running Demucs locally (CPU)")
-            demucs_out = output_dir / "_demucs"
+            # Unique per-run dir: concurrent runs must never share (and rmtree) one.
+            demucs_out = output_dir / f"_demucs_{uuid.uuid4().hex[:8]}"
+            # wav out: lossless master; mp3s are encoded from these afterwards.
             result = subprocess.run(
-                [sys.executable, "-m", "demucs", "--mp3", "-n", "htdemucs",
+                [sys.executable, "-m", "demucs", "-n", "htdemucs",
                  "--out", str(demucs_out), str(audio_path)],
                 capture_output=True, text=True
             )
@@ -361,15 +418,17 @@ def extract_stems_and_convert_to_midi(audio_path, output_dir):
                 shutil.copy2(f, demucs_stems_dir / f.name)
             shutil.rmtree(demucs_out, ignore_errors=True)
             logger.info("Local Demucs separation complete")
+        prog("midi", 55, "Stem separation done — converting stems to MIDI")
         stem_names = ["drums", "bass", "vocals", "other"]
 
         midi_files = []
         musicxml_files = []
         audio_stems = []
 
-        for stem_name in stem_names:
+        for idx, stem_name in enumerate(stem_names):
+            prog("midi", 55 + int(idx * 7.5), f"Converting {stem_name} to MIDI")
             stem_src = None
-            for ext in ["mp3", "wav"]:
+            for ext in ["wav", "mp3"]:
                 candidate = demucs_stems_dir / f"{stem_name}.{ext}"
                 if candidate.exists():
                     stem_src = candidate
@@ -379,15 +438,24 @@ def extract_stems_and_convert_to_midi(audio_path, output_dir):
                 logger.warning(f"Demucs did not produce {stem_name}")
                 continue
 
-            # Copy stem audio into output dir
-            stem_audio_path = output_dir / f"{stem_name}{stem_src.suffix}"
-            shutil.copy2(stem_src, stem_audio_path)
-            audio_stems.append(stem_audio_path.name)
-            logger.info(f"Saved audio stem: {stem_audio_path.name}")
+            # Stem audio masters: wav as-is, mp3 encoded from it
+            stem_wav_path = output_dir / f"{stem_name}.wav"
+            if stem_src.suffix == ".wav":
+                shutil.copy2(stem_src, stem_wav_path)
+            else:
+                shutil.copy2(stem_src, output_dir / f"{stem_name}.mp3")
+                stem_wav_path = None
+            if stem_wav_path:
+                try:
+                    _encode_mp3(stem_wav_path, output_dir / f"{stem_name}.mp3")
+                except Exception as e:
+                    logger.warning(f"mp3 encode failed for {stem_name}: {e}")
+            audio_stems.append(f"{stem_name}.wav" if stem_wav_path else f"{stem_name}.mp3")
+            logger.info(f"Saved audio stem: {stem_name}")
 
             # Convert stem to MIDI via Basic Pitch
             try:
-                _, stem_midi, _ = predict(str(stem_audio_path))
+                _, stem_midi, _ = predict(str(stem_wav_path or (output_dir / f"{stem_name}.mp3")))
                 stem_midi_path = output_dir / f"{stem_name}.mid"
                 stem_midi.write(str(stem_midi_path))
                 midi_files.append(stem_midi_path.name)
@@ -399,13 +467,47 @@ def extract_stems_and_convert_to_midi(audio_path, output_dir):
                 logger.info(f"Stem MIDI + MusicXML done: {stem_name}")
             except Exception as e:
                 logger.warning(f"MIDI conversion failed for {stem_name}: {e}")
+            prog("midi", 55 + int((idx + 1) * 7.5), f"{stem_name} converted")
+
+        # Instrumental = beat without vocals: mix of the non-vocal stems
+        prog("instrumental", 86, "Mixing instrumental (beat without vocals)")
+        instrumental_wav = output_dir / "instrumental.wav"
+        try:
+            if _mix_instrumental(output_dir, instrumental_wav):
+                _encode_mp3(instrumental_wav, output_dir / "instrumental.mp3")
+                _, inst_midi, _ = predict(str(instrumental_wav))
+                inst_midi_path = output_dir / "instrumental.mid"
+                inst_midi.write(str(inst_midi_path))
+                midi_files.append(inst_midi_path.name)
+                inst_xml = convert_midi_to_musicxml(inst_midi_path, output_dir, "instrumental")
+                if inst_xml:
+                    musicxml_files.append(inst_xml)
+                audio_stems.append("instrumental.wav")
+                logger.info("Instrumental (no vocals) mix done")
+        except Exception as e:
+            logger.warning(f"Instrumental mix failed: {e}")
 
         # Full-arrangement MusicXML
         main_musicxml_path = convert_midi_to_musicxml(main_midi_file, output_dir, "full_arrangement")
         if main_musicxml_path:
             musicxml_files.append(main_musicxml_path)
 
+        # Original-vocal transcription (local faster-whisper) — ships in the DAW package
+        prog("transcription", 92, "Transcribing original vocals")
+        transcription_file = None
+        try:
+            tr = whisper_transcribe(str(audio_path))
+            text = (tr.get("text") or "").strip()
+            if text:
+                tr_path = output_dir / "transcription.txt"
+                tr_path.write_text(text, encoding="utf-8")
+                transcription_file = tr_path.name
+                logger.info("Original-vocal transcription saved")
+        except Exception as e:
+            logger.warning(f"Transcription failed: {e}")
+
         create_transformation_info(output_dir, midi_files, musicxml_files)
+        prog("done", 100, "Packaging complete")
 
         # Clean up stems temp dir
         shutil.rmtree(demucs_stems_dir, ignore_errors=True)
@@ -416,6 +518,7 @@ def extract_stems_and_convert_to_midi(audio_path, output_dir):
             "stem_midis": midi_files,
             "musicxml_files": musicxml_files,
             "audio_stems": audio_stems,
+            "transcription_file": transcription_file,
             "success": True
         }
 
@@ -765,7 +868,8 @@ async def legal_scan(project_id: str):
         try:
             y, sr = await asyncio.to_thread(librosa.load, str(file_path), sr=None, mono=True, duration=60)
             tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-            bpm = round(float(tempo), 1)
+            # librosa >=0.10 returns tempo as a 1-element array, not a scalar
+            bpm = round(float(np.squeeze(tempo)), 1)
             chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
             key_idx = int(np.argmax(chroma.mean(axis=1)))
             key_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
@@ -876,14 +980,29 @@ async def legal_scan(project_id: str):
 
 
 # Beat Transformation (Advanced Audio-to-MIDI Conversion)
+# In-memory progress for in-flight transforms (survives only while the task runs).
+# transform-status falls back to this while a task is live, and to a stale-recovery
+# failure when the DB says "processing" but no task is actually running.
+_TRANSFORM_PROGRESS: Dict[str, Dict[str, Any]] = {}
+
+
+def _set_progress(project_id: str, stage: str, pct: int, detail: str = ""):
+    _TRANSFORM_PROGRESS[project_id] = {
+        "stage": stage, "percent": int(pct), "detail": detail,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 async def _run_transform(project_id: str, original_path: str):
     """Background task: runs Demucs + Basic Pitch, writes results to DB."""
     transform_dir = UPLOAD_DIR / f"{project_id}_stems"
     transform_dir.mkdir(exist_ok=True)
+    _set_progress(project_id, "start", 0, "Starting")
     try:
         loop = asyncio.get_event_loop()
         transformation_result = await loop.run_in_executor(
-            None, extract_stems_and_convert_to_midi, original_path, str(transform_dir)
+            None, extract_stems_and_convert_to_midi, original_path, str(transform_dir),
+            lambda stage, pct, detail="": _set_progress(project_id, stage, pct, detail),
         )
         if not transformation_result.get("success"):
             raise RuntimeError(transformation_result.get("error", "Unknown error"))
@@ -895,6 +1014,7 @@ async def _run_transform(project_id: str, original_path: str):
                 "musicxml_files": transformation_result.get("musicxml_files", []),
                 "audio_stems": transformation_result.get("audio_stems", []),
                 "main_midi": transformation_result.get("main_midi"),
+                "transcription_file": transformation_result.get("transcription_file"),
                 "transformation_type": "advanced_stems_midi",
                 "transformation_complete": True,
                 "transform_status": "complete",
@@ -909,6 +1029,8 @@ async def _run_transform(project_id: str, original_path: str):
             {"$set": {"transform_status": "failed", "transform_error": str(e),
                       "updated_at": datetime.now(timezone.utc).isoformat()}}
         )
+    finally:
+        _TRANSFORM_PROGRESS.pop(project_id, None)
 
 
 @api_router.post("/projects/{project_id}/transform")
@@ -922,11 +1044,17 @@ async def transform_beat(project_id: str):
     if not original_path.exists():
         raise HTTPException(status_code=404, detail="Audio file not found on disk")
 
-    await db.projects.update_one(
-        {"id": project_id},
+    # Atomic claim: only the request that flips status -> "processing" starts the
+    # pipeline. A second near-simultaneous request (React StrictMode double-mount)
+    # matches 0 documents and returns early instead of starting a duplicate run.
+    claimed = await db.projects.update_one(
+        {"id": project_id, "transform_status": {"$ne": "processing"}},
         {"$set": {"transform_status": "processing", "transform_error": None,
                   "updated_at": datetime.now(timezone.utc).isoformat()}}
     )
+    if claimed.matched_count == 0:
+        return {"status": "processing", "project_id": project_id}
+
     try:
         await create_bounded_task(_run_transform(project_id, str(original_path)), name=f"transform-{project_id}")
     except Exception as e:
@@ -957,11 +1085,25 @@ async def transform_status(project_id: str):
             "main_midi": project.get("main_midi"),
         }
     if status == "failed":
+        # 200, not 500: a failed transform is a valid status answer. A 500 here
+        # makes the frontend poller treat the failure as transient and retry forever.
         error_msg = project.get("transform_error", "Unknown error")
-        return JSONResponse(
-            status_code=500,
-            content={"status": "failed", "success": False, "error": error_msg}
+        return {"status": "failed", "success": False, "error": error_msg}
+    if status == "processing":
+        prog = _TRANSFORM_PROGRESS.get(project_id)
+        if prog:
+            return {"status": "processing", "progress": prog}
+        # DB says processing but no task is running in this process — the backend
+        # restarted (or the task died) mid-run. Recover to a failed state so the
+        # UI stops polling forever and the user can retry.
+        await db.projects.update_one(
+            {"id": project_id},
+            {"$set": {"transform_status": "failed",
+                      "transform_error": "Transform was interrupted (server restarted). Please run it again.",
+                      "updated_at": datetime.now(timezone.utc).isoformat()}}
         )
+        return {"status": "failed", "success": False,
+                "error": "Transform was interrupted (server restarted). Please run it again."}
     return {"status": status}
 
 # New endpoint to download transformation package
@@ -979,18 +1121,30 @@ async def download_stems_package(project_id: str):
     if not stems_dir.exists():
         raise HTTPException(status_code=404, detail="Stems directory not found")
     
-    # Create ZIP file
+    # Create ZIP file — structured DAW package
     import zipfile
-    zip_filename = f"{project['name']}_stems_package.zip"
+    zip_filename = f"{project['name']}_DAW_Package.zip"
     zip_path = UPLOAD_DIR / zip_filename
-    
+
+    def _add(zipf, folder: str, names):
+        for n in names:
+            p = stems_dir / n
+            if p.exists():
+                zipf.write(p, f"{folder}/{n}" if folder else n)
+
     try:
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Add all files from stems directory
-            for file_path in stems_dir.glob("*"):
-                if file_path.is_file():
-                    zipf.write(file_path, file_path.name)
-        
+            vocal_extra = [project["transcription_file"]] if project.get("transcription_file") else []
+            _add(zipf, "Vocal", vocal_extra + [
+                "vocals.mp3", "vocals.wav", "vocals.mid", "vocals.musicxml"])
+            _add(zipf, "Instrumental", [
+                "instrumental.mp3", "instrumental.wav", "instrumental.mid", "instrumental.musicxml"])
+            _add(zipf, "Full_Arrangement", ["full_song.mid", "full_arrangement.musicxml"])
+            for stem in ["drums", "bass", "other"]:
+                _add(zipf, f"Stems/{stem}", [
+                    f"{stem}.mp3", f"{stem}.wav", f"{stem}.mid", f"{stem}.musicxml"])
+            _add(zipf, "", ["transformation_guide.txt"])
+
         return FileResponse(
             zip_path,
             filename=zip_filename,
@@ -1004,17 +1158,59 @@ async def download_stems_package(project_id: str):
 
 @api_router.get("/projects/{project_id}/download-beat")
 async def download_beat(project_id: str):
+    """The cleared beat = the instrumental (beat without vocals), falling back to the original."""
     project = await db.projects.find_one({"id": project_id})
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    beat_file = project.get("transformed_file") or project.get("original_file")
-    if not beat_file:
-        raise HTTPException(status_code=404, detail="No beat file found for this project")
-    beat_path = UPLOAD_DIR / beat_file
+    stems_dir = UPLOAD_DIR / project['stems_directory'] if project.get('stems_directory') else None
+    beat_path = None
+    if stems_dir and stems_dir.exists():
+        for name in ["instrumental.mp3", "instrumental.wav"]:
+            cand = stems_dir / name
+            if cand.exists():
+                beat_path = cand
+                break
+    if not beat_path:
+        beat_file = project.get("transformed_file") or project.get("original_file")
+        if not beat_file:
+            raise HTTPException(status_code=404, detail="No beat file found for this project")
+        beat_path = UPLOAD_DIR / beat_file
     if not beat_path.exists():
         raise HTTPException(status_code=404, detail="Beat file not found on disk")
     media_type = "audio/mpeg" if beat_path.suffix.lower() == ".mp3" else "audio/wav"
     return FileResponse(str(beat_path), media_type=media_type, filename=f"CLEARED_BEAT{beat_path.suffix}")
+
+
+@api_router.get("/projects/{project_id}/transcription")
+async def get_transcription(project_id: str):
+    """Return the original-vocal transcription text (Gateway 02)."""
+    project = await db.projects.find_one({"id": project_id})
+    if not project or not project.get('stems_directory'):
+        raise HTTPException(status_code=404, detail="No transcription for this project")
+    tr_name = project.get("transcription_file")
+    if not tr_name:
+        return {"text": ""}
+    path = UPLOAD_DIR / project['stems_directory'] / tr_name
+    if not path.exists():
+        return {"text": ""}
+    return {"text": path.read_text(encoding="utf-8")}
+
+
+@api_router.get("/projects/{project_id}/stem-audio/{stem_name}")
+async def stream_stem_audio(project_id: str, stem_name: str):
+    """Stream a stem audio file (for in-app playback). stem_name e.g. 'vocals.wav'."""
+    project = await db.projects.find_one({"id": project_id})
+    if not project or not project.get('stems_directory'):
+        raise HTTPException(status_code=404, detail="No stems for this project")
+    if stem_name not in {
+        f"{s}.{e}" for s in ["drums", "bass", "vocals", "other", "instrumental"] for e in ["wav", "mp3"]
+    }:
+        raise HTTPException(status_code=400, detail="Invalid stem name")
+    path = (UPLOAD_DIR / project['stems_directory'] / stem_name).resolve()
+    if not str(path).startswith(str(UPLOAD_DIR.resolve())) or not path.exists():
+        raise HTTPException(status_code=404, detail="Stem not found")
+    media_type = "audio/mpeg" if path.suffix == ".mp3" else "audio/wav"
+    return FileResponse(str(path), media_type=media_type)
 
 
 # Lyrics Generation
@@ -1133,6 +1329,7 @@ async def generate_lyrics(project_id: str, request: LyricsRequest):
         generated_lyrics = await ollama_generate(
             base_url=base_url, model=model, prompt=base_prompt,
             system=system_msg, temperature=0.9,
+            api_key=request.llm_api_key or "",
         )
         if not generated_lyrics:
             raise HTTPException(status_code=500, detail="LLM returned empty response")
@@ -1354,6 +1551,7 @@ async def compute_fingerprint(body: FingerprintComputeRequest):
                 base_url=base_url, model=model, prompt=theme_prompt,
                 system="You are a music critic analyzing an artist's style.",
                 temperature=0.4,
+                api_key=body.llm_api_key or "",
             )
         except HTTPException:
             logger.warning("Ollama theme pass failed; storing heuristic-only fingerprint")
@@ -1472,7 +1670,7 @@ async def ollama_test_connection(req: OllamaTestRequest):
     """Test connection to an Ollama server and return its available models"""
     base_url = (req.base_url or DEFAULT_OLLAMA_BASE_URL).rstrip('/')
     try:
-        models_raw = await ollama_list_models(base_url)
+        models_raw = await ollama_list_models(base_url, req.api_key or "")
         models = []
         for m in models_raw:
             details = m.get('details', {}) or {}

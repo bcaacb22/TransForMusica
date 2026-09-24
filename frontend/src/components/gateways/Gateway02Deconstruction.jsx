@@ -1,16 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { apiPost, apiGet, apiGetBlob, triggerDownload } from '../../lib/apiClient'
+import AudioPlayer from '../AudioPlayer'
 
-// ─── Stem manifest ────────────────────────────────────────────────────────────
+// ─── Stem manifest (matches the demucs + basic-pitch pipeline output) ────────
 
 const ALL_STEMS = [
-  { id: 'kick',       label: 'KICK',       audio: true, midi: true,  xml: false },
-  { id: 'bass',       label: 'BASS',       audio: true, midi: true,  xml: false },
-  { id: 'melody',     label: 'MELODY',     audio: true, midi: true,  xml: true  },
-  { id: 'harmony',    label: 'HARMONY',    audio: true, midi: true,  xml: true  },
-  { id: 'percussion', label: 'PERCUSSION', audio: true, midi: true,  xml: false },
-  { id: 'vocal',      label: 'VOCAL',      audio: true, midi: true,  xml: true  },
-  { id: 'full_score', label: 'FULL SCORE', audio: false,midi: false, xml: true  },
+  { id: 'vocals',       label: 'VOCALS',       audio: true, midi: true, xml: true },
+  { id: 'instrumental', label: 'INSTRUMENTAL', audio: true, midi: true, xml: true },
+  { id: 'drums',        label: 'DRUMS',        audio: true, midi: true, xml: true },
+  { id: 'bass',         label: 'BASS',         audio: true, midi: true, xml: true },
+  { id: 'other',        label: 'OTHER',        audio: true, midi: true, xml: true },
 ]
 
 function initStemSelection() {
@@ -177,6 +176,8 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
   const [stemSelection, setStemSelection] = useState(initStemSelection)
   const [downloading, setDownloading] = useState(false)
   const [apiError, setApiError] = useState(null)
+  const [transcription, setTranscription] = useState(null)
+  const [progress, setProgress] = useState(null)
   const pollRef = useRef(null)
 
   // Trigger transform on mount and poll for status
@@ -205,6 +206,9 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
             if (!cancelled) {
               setTransformPending(false)
               setTransformResult(data)
+              apiGet(`/api/projects/${projectId}/transcription`)
+                .then(t => { if (!cancelled && t?.text) setTranscription(t.text) })
+                .catch(() => {})
             }
           } else if (data.status === 'failed') {
             clearInterval(pollRef.current)
@@ -213,11 +217,13 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
               setTransformPending(false)
               setApiError(`Transform: ${data.error}`)
             }
+          } else if (data.status === 'processing' && data.progress) {
+            if (!cancelled) setProgress(data.progress)
           }
         } catch (e) {
           // keep polling on transient errors
         }
-      }, 5000)
+      }, 3000)
     }
 
     triggerTransform()
@@ -256,18 +262,17 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
     onComplete()
   }, [onComplete])
 
-  const handleExit = useCallback(async () => {
+  const handleExit = useCallback(() => {
     if (!projectId) return
     setApiError(null)
-    setDownloading(true)
-    try {
-      const blob = await apiGetBlob(`/api/projects/${projectId}/download-stems`)
-      triggerDownload(blob, 'DAW_PACKAGE.zip')
-    } catch (e) {
-      setApiError(`Download: ${e.message}`)
-    } finally {
-      setDownloading(false)
-    }
+    // Direct browser download — streams the (large) ZIP natively instead of
+    // buffering it in memory via fetch, which fails on ~180MB packages.
+    const a = document.createElement('a')
+    a.href = `/api/projects/${projectId}/download-stems`
+    a.download = 'DAW_PACKAGE.zip'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
   }, [projectId])
 
   return (
@@ -312,32 +317,63 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
         {/* Gateway content: pending or complete */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
           {transformPending ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div style={{
                 fontFamily: 'JetBrains Mono', fontSize: '9px',
                 color: 'var(--neon)', letterSpacing: '0.15em',
-                animation: 'blink 1.2s step-end infinite',
               }}>
-                ▶ DEMUCS SEPARATING STEMS...
+                ▶ {progress?.detail?.toUpperCase() || 'DECONSTRUCTING AUDIO...'}
               </div>
-              <div style={{
-                fontFamily: 'JetBrains Mono', fontSize: '8px',
-                color: 'var(--text-secondary)', letterSpacing: '0.1em', lineHeight: 1.8,
-              }}>
-                NEURAL SOURCE SEPARATION IN PROGRESS<br />
-                DRUMS · BASS · VOCALS · OTHER<br />
-                MIDI CONVERSION QUEUED
-              </div>
-              <div style={{
-                height: '2px', background: 'rgba(0,255,136,0.15)',
-                position: 'relative', overflow: 'hidden',
-              }}>
+
+              {/* Live progress bar */}
+              <div>
                 <div style={{
-                  position: 'absolute', top: 0, left: '-40%',
-                  width: '40%', height: '100%',
-                  background: 'var(--neon)',
-                  animation: 'scanLine 1.8s linear infinite',
-                }} />
+                  display: 'flex', justifyContent: 'space-between',
+                  fontFamily: 'JetBrains Mono', fontSize: '9px',
+                  color: 'var(--text-secondary)', marginBottom: '6px',
+                }}>
+                  <span>{(progress?.stage || 'start').toUpperCase()}</span>
+                  <span style={{ color: 'var(--neon)' }}>{progress?.percent ?? 0}%</span>
+                </div>
+                <div style={{
+                  height: '6px', background: 'rgba(0,255,136,0.1)',
+                  border: '1px solid rgba(0,255,136,0.2)', position: 'relative', overflow: 'hidden',
+                }}>
+                  <div style={{
+                    position: 'absolute', top: 0, left: 0, bottom: 0,
+                    width: `${progress?.percent ?? 0}%`,
+                    background: 'var(--neon)', boxShadow: 'var(--neon-glow)',
+                    transition: 'width 0.6s ease',
+                  }} />
+                </div>
+              </div>
+
+              {/* Stage checklist */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {[
+                  { key: 'basic_pitch', label: 'MIDI TRANSCRIPTION (BASIC PITCH)' },
+                  { key: 'demucs', label: 'NEURAL STEM SEPARATION (DEMUCS)' },
+                  { key: 'midi', label: 'STEM → MIDI + MUSICXML' },
+                  { key: 'instrumental', label: 'INSTRUMENTAL MIX (NO VOCALS)' },
+                  { key: 'transcription', label: 'VOCAL TRANSCRIPTION' },
+                ].map((s, i, arr) => {
+                  const order = ['basic_pitch', 'demucs', 'midi', 'instrumental', 'transcription']
+                  const cur = progress?.stage || 'start'
+                  const curIdx = order.indexOf(cur)
+                  const done = curIdx > i || cur === 'done'
+                  const active = cur === s.key
+                  return (
+                    <div key={s.key} style={{
+                      display: 'flex', alignItems: 'center', gap: '8px',
+                      fontFamily: 'JetBrains Mono', fontSize: '9px', letterSpacing: '0.08em',
+                      color: done ? 'rgba(0,255,136,0.6)' : active ? 'var(--neon)' : 'rgba(255,255,255,0.25)',
+                    }}>
+                      <span style={{ width: '12px' }}>{done ? '✓' : active ? '▶' : '·'}</span>
+                      <span>{s.label}</span>
+                      {active && <span style={{ animation: 'blink 0.8s step-end infinite' }}>█</span>}
+                    </div>
+                  )
+                })}
               </div>
             </div>
           ) : (
@@ -349,6 +385,40 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
                 STEMS EXTRACTED · SELECT FILES TO DOWNLOAD
               </div>
               <StemSelectionTable selection={stemSelection} onChange={setStemSelection} />
+
+              {/* Audio players — hear the stems to confirm the right files */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <div style={{
+                  fontFamily: 'JetBrains Mono', fontSize: '9px',
+                  color: 'var(--text-secondary)', letterSpacing: '0.12em',
+                }}>
+                  LISTEN
+                </div>
+                <AudioPlayer src={`/api/projects/${projectId}/stem-audio/instrumental.mp3`} label="INSTRUMENTAL" />
+                <AudioPlayer src={`/api/projects/${projectId}/stem-audio/vocals.mp3`} label="VOCALS" />
+              </div>
+
+              {/* Original-vocal transcription */}
+              {transcription && (
+                <div style={{
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  padding: '12px',
+                }}>
+                  <div style={{
+                    fontFamily: 'JetBrains Mono', fontSize: '9px',
+                    color: 'var(--neon)', letterSpacing: '0.12em', marginBottom: '8px',
+                  }}>
+                    ORIGINAL LYRICS — TRANSCRIBED
+                  </div>
+                  <div style={{
+                    fontFamily: 'Outfit', fontWeight: 300, fontSize: '11px',
+                    lineHeight: 1.7, color: 'rgba(255,255,255,0.75)',
+                    whiteSpace: 'pre-line', maxHeight: '140px', overflow: 'auto',
+                  }}>
+                    {transcription}
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -379,24 +449,6 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
         display: 'flex', flexDirection: 'column', gap: '8px',
       }}>
         <button
-          onClick={handleProceed}
-          disabled={transformPending}
-          style={{
-            background: 'var(--neon)',
-            color: '#000000',
-            fontFamily: 'JetBrains Mono',
-            fontWeight: 500,
-            fontSize: '12px',
-            letterSpacing: '0.1em',
-            padding: '12px 20px',
-            border: 'none',
-            boxShadow: transformPending ? 'none' : 'var(--neon-glow)',
-            transition: 'opacity 0.15s',
-          }}
-        >
-          {transformPending ? '// PROCESSING...' : '> PROCEED TO MORPH ENGINE'}
-        </button>
-        <button
           onClick={!downloading ? handleExit : undefined}
           disabled={downloading || transformPending}
           style={{
@@ -415,7 +467,25 @@ export default function Gateway02Deconstruction({ projectId, project, onComplete
             ? '// PACKAGING...'
             : transformPending
               ? '// PROCESSING...'
-              : 'EXIT: DOWNLOAD DAW PACKAGE'}
+              : 'DOWNLOAD DAW PACKAGE'}
+        </button>
+        <button
+          onClick={handleProceed}
+          disabled={transformPending}
+          style={{
+            background: 'var(--neon)',
+            color: '#000000',
+            fontFamily: 'JetBrains Mono',
+            fontWeight: 500,
+            fontSize: '12px',
+            letterSpacing: '0.1em',
+            padding: '12px 20px',
+            border: 'none',
+            boxShadow: transformPending ? 'none' : 'var(--neon-glow)',
+            transition: 'opacity 0.15s',
+          }}
+        >
+          {transformPending ? '// PROCESSING...' : '> PROCEED TO MORPH ENGINE'}
         </button>
       </div>
     </div>
