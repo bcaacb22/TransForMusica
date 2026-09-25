@@ -167,6 +167,7 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
       '',
       '── IDENTIFICATION ──────────────────────────────────────',
       `MATCHED SOURCE     : ${d.matchedSource}`,
+      d.matchedBy ? `MATCHED BY         : ${d.matchedBy}` : '',
       `ISRC               : ${d.isrc || 'NOT REGISTERED'}`,
       `LABEL              : ${d.label || '—'}`,
       `RELEASE DATE       : ${d.releaseDate || '—'}`,
@@ -189,7 +190,7 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
         : 'CLEAR TO PROCEED. No registered match found in database.',
       '',
       '────────────────────────────────────────────────────────',
-      'Powered by Shazam API v2 audio recognition.',
+      'Powered by Shazam API v2 + AcoustID (Chromaprint) audio recognition.',
       'This report is generated for informational purposes only.',
       'It does not constitute legal advice.',
     ].filter(Boolean).join('\n')

@@ -905,6 +905,7 @@ async def legal_scan(project_id: str):
         match_release_date = match_timecode = match_isrc = match_genre = None
         match_spotify_url = match_apple_music_url = match_album_art = match_song_link = None
         scan_error = None
+        matched_by = None
 
         if SHAZAM_API_KEY:
             try:
@@ -923,6 +924,7 @@ async def legal_scan(project_id: str):
                     match_spotify_url = links.get("spotify")
                     match_apple_music_url = links.get("appleMusic")
                     match_song_link = links.get("shazam")
+                    matched_by = "Shazam API v2"
                 elif rec["status"] == "failed":
                     scan_error = f"Shazam {rec['code']}: {rec['error']}"
             except Exception as e:
@@ -939,6 +941,7 @@ async def legal_scan(project_id: str):
                     match_title = r.get("title")
                     match_artist = r.get("artist")
                     match_isrc = r.get("isrc")
+                    matched_by = "AcoustID (Chromaprint)"
                     scan_error = None  # clear any Shazam error — we got a match
             except Exception:
                 pass  # AcoustID failure is silent — Shazam result stands
@@ -1008,6 +1011,7 @@ async def legal_scan(project_id: str):
         result = {
             "similarityScore": 100 if match_title else 0,
             "matchedSource": matched_source,
+            "matchedBy": matched_by,
             "audioFingerprint": match_isrc or "NOT REGISTERED",
             "lyricalMatch": lyrical_match,
             "violationRisk": violation_risk,
