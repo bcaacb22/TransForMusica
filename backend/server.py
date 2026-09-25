@@ -904,6 +904,8 @@ async def legal_scan(project_id: str):
         scan_error = None
         shazam_result = None
         acoustid_result = None
+        shazam_ran_clean = False
+        acoustid_ran_clean = False
 
         if SHAZAM_API_KEY:
             try:
@@ -925,8 +927,12 @@ async def legal_scan(project_id: str):
                         "albumArt": r.get("artwork"),
                         "songLink": links.get("shazam"),
                     }
+                    matched_by = "Shazam API v2"
+                    shazam_ran_clean = True
                 elif rec["status"] == "failed":
                     scan_error = f"Shazam {rec['code']}: {rec['error']}"
+                elif rec["status"] == "no_matches":
+                    shazam_ran_clean = True
             except Exception as e:
                 scan_error = str(e)
         else:
@@ -951,6 +957,9 @@ async def legal_scan(project_id: str):
                         "albumArt": None,
                         "songLink": None,
                     }
+                    acoustid_ran_clean = True
+                elif rec2["status"] == "no_matches":
+                    acoustid_ran_clean = True
             except Exception:
                 pass  # AcoustID failure is silent
 
@@ -1024,13 +1033,20 @@ async def legal_scan(project_id: str):
             except Exception:
                 pass
 
-        # Determine violation risk based on scan outcome
-        if not SHAZAM_API_KEY:
+        # Determine violation risk based on scan outcome.
+        # If at least one engine ran and returned a clean "no match", that's
+        # a definitive NONE — not "LOOKUP UNAVAILABLE". UNKNOWN only when
+        # every engine errored out.
+        any_engine_ran_clean = shazam_ran_clean or acoustid_ran_clean
+        if not SHAZAM_API_KEY and not ACOUSTID_API_KEY:
             violation_risk = "UNAVAILABLE"
-            matched_source = "SCAN UNAVAILABLE — no Shazam API key configured"
+            matched_source = "SCAN UNAVAILABLE — no recognition API key configured"
         elif match_title:
             violation_risk = "HIGH"
             matched_source = f"{match_title} — {match_artist}" if match_artist else match_title
+        elif any_engine_ran_clean:
+            violation_risk = "NONE"
+            matched_source = "NO MATCH FOUND"
         elif scan_error:
             violation_risk = "UNKNOWN"
             matched_source = "LOOKUP UNAVAILABLE"
