@@ -35,29 +35,21 @@ REM   - Override: set TORCH_BACKEND=cuda  or  TORCH_BACKEND=cpu  before running
 REM ---------------------------------------------------------------------------
 echo.
 echo === PyTorch backend selection ===
-set "TORCH_CHOICE="
-if defined TORCH_BACKEND (
-    set "TORCH_CHOICE=!TORCH_BACKEND!"
-    echo Using override TORCH_BACKEND=!TORCH_BACKEND!
-) else (
+set "TORCH_CHOICE=cpu"
+if defined TORCH_BACKEND set "TORCH_CHOICE=%TORCH_BACKEND%"
+if not defined TORCH_BACKEND (
     nvidia-smi >nul 2>&1
-    if !errorlevel! equ 0 (
-        set "TORCH_CHOICE=cuda"
-    ) else (
-        set "TORCH_CHOICE=cpu"
-    )
+    if !errorlevel! equ 0 set "TORCH_CHOICE=cuda"
 )
 
 if "!TORCH_CHOICE!"=="cuda" (
-    echo Detected NVIDIA GPU - installing CUDA-enabled PyTorch (fast demucs).
-    echo To force CPU instead, re-run with:  set TORCH_BACKEND=cpu
+    echo Detected NVIDIA GPU - installing CUDA-enabled PyTorch.
     pip install torch --index-url https://download.pytorch.org/whl/cu126
 ) else (
-    echo No NVIDIA GPU detected - installing CPU-only PyTorch.
-    echo If you DO have an NVIDIA GPU and want it used, re-run with:  set TORCH_BACKEND=cuda
+    echo Installing CPU-only PyTorch.
     pip install torch --index-url https://download.pytorch.org/whl/cpu
 )
-if %errorlevel% neq 0 (
+if !errorlevel! neq 0 (
     echo WARNING: PyTorch install failed. Demucs stem separation may not work.
 )
 
