@@ -506,6 +506,11 @@ def extract_stems_and_convert_to_midi(audio_path, output_dir, progress_cb=None):
             # Convert stem to MIDI via Basic Pitch
             try:
                 _, stem_midi, _ = predict(str(stem_wav_path or (output_dir / f"{stem_name}.mp3")))
+                # Zero-velocity note at t=0 so every stem MIDI clip begins at
+                # the same point when imported into a DAW.
+                import pretty_midi as _pm
+                for inst in stem_midi.instruments:
+                    inst.notes.insert(0, _pm.Note(velocity=0, pitch=0, start=0.0, end=0.01))
                 stem_midi_path = output_dir / f"{stem_name}.mid"
                 stem_midi.write(str(stem_midi_path))
                 midi_files.append(stem_midi_path.name)
