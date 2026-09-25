@@ -414,7 +414,7 @@ export default function Gateway03Morph({ projectId, project, onComplete }) {
                     border: '1px solid rgba(255,255,255,0.15)', padding: '8px',
                   }}
                 >
-                  {KEY_OPTIONS.map(k => <option key={k} value={k}>{k}</option>)}
+                  {KEY_OPTIONS.map(k => <option key={k} value={k} style={{ background: '#111', color: '#eee' }}>{k}</option>)}
                 </select>
               </label>
               <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>

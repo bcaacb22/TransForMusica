@@ -335,6 +335,20 @@ def _save_upload_sync(src, dest: Path):
         shutil.copyfileobj(src, buffer)
 
 
+def _clean_stem(wav_path: Path) -> None:
+    """Normalize peak to -1 dBFS and apply a soft noise gate (-45 dB threshold)
+    to remove separation artifacts/bleed from a Demucs stem. In-place."""
+    import soundfile as _sf
+    data, sr = _sf.read(str(wav_path), dtype="float32", always_2d=True)
+    peak = float(np.abs(data).max())
+    if peak > 1e-8:
+        data = data * (10 ** (-1 / 20)) / peak  # normalize to -1 dBFS
+    # Soft noise gate: attenuate samples below -45 dB
+    threshold = 10 ** (-45 / 20)
+    mask = np.abs(data) < threshold
+    data[mask] *= 0.05  # attenuate to 5% instead of hard-zeroing (avoids clicks)
+    _sf.write(str(wav_path), data, sr, subtype="PCM_16")
+
 def _encode_mp3(wav_path: Path, mp3_path: Path, bitrate: int = 320):
     """Encode a wav stem to mp3 with lameenc (ships as a demucs dependency)."""
     import soundfile as _sf
@@ -354,7 +368,7 @@ def _mix_instrumental(output_dir: Path, out_path: Path):
     """Sum the non-vocal stems into a single instrumental wav (the beat without vocals)."""
     import soundfile as _sf
     tracks, sr = [], None
-    for name in ["drums", "bass", "other"]:
+    for name in ["drums", "bass", "other", "guitar", "piano"]:
         p = output_dir / f"{name}.wav"
         if p.exists():
             data, rate = _sf.read(str(p), dtype="float32", always_2d=True)
@@ -435,19 +449,19 @@ def extract_stems_and_convert_to_midi(audio_path, output_dir, progress_cb=None):
             demucs_out = output_dir / f"_demucs_{uuid.uuid4().hex[:8]}"
             # wav out: lossless master; mp3s are encoded from these afterwards.
             result = subprocess.run(
-                [sys.executable, "-m", "demucs", "-n", "htdemucs",
+                [sys.executable, "-m", "demucs", "-n", "htdemucs_6s",
                  "--out", str(demucs_out), str(audio_path)],
                 capture_output=True, text=True
             )
             if result.returncode != 0:
                 raise RuntimeError(f"Demucs failed: {result.stderr[-500:]}")
-            src_dir = demucs_out / "htdemucs" / audio_stem
+            src_dir = demucs_out / "htdemucs_6s" / audio_stem
             for f in src_dir.glob("*"):
                 shutil.copy2(f, demucs_stems_dir / f.name)
             shutil.rmtree(demucs_out, ignore_errors=True)
             logger.info("Local Demucs separation complete")
         prog("midi", 55, "Stem separation done — converting stems to MIDI")
-        stem_names = ["drums", "bass", "vocals", "other"]
+        stem_names = ["drums", "bass", "vocals", "other", "guitar", "piano"]
 
         midi_files = []
         musicxml_files = []
@@ -466,10 +480,14 @@ def extract_stems_and_convert_to_midi(audio_path, output_dir, progress_cb=None):
                 logger.warning(f"Demucs did not produce {stem_name}")
                 continue
 
-            # Stem audio masters: wav as-is, mp3 encoded from it
+            # Stem audio masters: wav cleaned (normalize + noise gate), mp3 from it
             stem_wav_path = output_dir / f"{stem_name}.wav"
             if stem_src.suffix == ".wav":
                 shutil.copy2(stem_src, stem_wav_path)
+                try:
+                    _clean_stem(stem_wav_path)
+                except Exception as e:
+                    logger.warning(f"Stem cleanup failed for {stem_name}: {e}")
             else:
                 shutil.copy2(stem_src, output_dir / f"{stem_name}.mp3")
                 stem_wav_path = None
@@ -1382,7 +1400,7 @@ async def download_stems_package(project_id: str):
                 _add(zipf, "Instrumental", [
                     "instrumental.mp3", "instrumental.wav", "instrumental.mid", "instrumental.musicxml"])
                 _add(zipf, "Full_Arrangement", ["full_song.mid", "full_arrangement.musicxml"])
-                for stem in ["drums", "bass", "other"]:
+                for stem in ["drums", "bass", "other", "guitar", "piano"]:
                     _add(zipf, f"Stems/{stem}", [
                         f"{stem}.mp3", f"{stem}.wav", f"{stem}.mid", f"{stem}.musicxml"])
                 _add(zipf, "", ["transformation_guide.txt"])
@@ -1458,7 +1476,7 @@ async def stream_stem_audio(project_id: str, stem_name: str):
     if not project or not project.get('stems_directory'):
         raise HTTPException(status_code=404, detail="No stems for this project")
     if stem_name not in {
-        f"{s}.{e}" for s in ["drums", "bass", "vocals", "other", "instrumental"] for e in ["wav", "mp3"]
+        f"{s}.{e}" for s in ["drums", "bass", "vocals", "other", "guitar", "piano", "instrumental"] for e in ["wav", "mp3"]
     }:
         raise HTTPException(status_code=400, detail="Invalid stem name")
     path = (UPLOAD_DIR / project['stems_directory'] / stem_name).resolve()
@@ -2153,6 +2171,23 @@ async def download_vocal(project_id: str):
 
 # Include the router in the main app
 app.include_router(api_router)
+
+# Serve the pre-built frontend (frontend/dist/) when present — enables the
+# standalone .exe mode where no Node/Vite dev server is needed.
+_FRONTEND_DIST = ROOT_DIR.parent / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    from fastapi.staticfiles import StaticFiles
+    from starlette.responses import FileResponse as _FR
+
+    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """SPA catch-all: serve index.html for any non-API route."""
+        candidate = _FRONTEND_DIST / full_path
+        if full_path and candidate.is_file():
+            return _FR(str(candidate))
+        return _FR(str(_FRONTEND_DIST / "index.html"))
 
 app.add_middleware(
     CORSMiddleware,

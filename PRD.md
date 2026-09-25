@@ -23,7 +23,7 @@ Musicians need a tool that takes any uploaded instrumental and transforms it int
 
 - [x] Project CRUD (create, list, get, delete)
 - [x] Audio upload (MP3/WAV/FLAC/OGG, multipart)
-- [x] Gateway 01: Legal Diagnostic (Shazam API v2 recognition)
+- [x] Gateway 01: Legal Diagnostic (Shazam API v2 + AcoustID fallback recognition)
 - [x] Gateway 02: Deconstruction (Demucs stems + Basic Pitch MIDI + music21 MusicXML)
 - [x] Gateway 04: Lyric Rebuild (LLM generation with 5 style modes)
 - [x] Style Engine (heuristic fingerprint + LLM theme pass + bias slider)

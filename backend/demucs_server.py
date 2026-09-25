@@ -29,7 +29,7 @@ def _get_demucs_model():
     global _demucs_model
     if _demucs_model is None:
         from demucs.pretrained import get_model
-        model = get_model("htdemucs")
+        model = get_model("htdemucs_6s")
         model.eval()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model.to(device)
@@ -58,7 +58,7 @@ def health():
     device = "cuda" if cuda_ok else "cpu"
     return {
         "status": "ok" if demucs_ok else "demucs_not_installed",
-        "model": "htdemucs",
+        "model": "htdemucs_6s",
         "device": device,
         "demucs_installed": demucs_ok,
     }

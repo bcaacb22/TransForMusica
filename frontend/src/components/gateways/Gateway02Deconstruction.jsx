@@ -9,6 +9,8 @@ const ALL_STEMS = [
   { id: 'instrumental', label: 'INSTRUMENTAL', audio: true, midi: true, xml: true },
   { id: 'drums',        label: 'DRUMS',        audio: true, midi: true, xml: true },
   { id: 'bass',         label: 'BASS',         audio: true, midi: true, xml: true },
+  { id: 'guitar',       label: 'GUITAR',       audio: true, midi: true, xml: true },
+  { id: 'piano',        label: 'PIANO',        audio: true, midi: true, xml: true },
   { id: 'other',        label: 'OTHER',        audio: true, midi: true, xml: true },
 ]
 

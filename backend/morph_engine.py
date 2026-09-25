@@ -46,7 +46,7 @@ KEY_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 # Instrumental stems that get morphed. Vocals are NEVER morphed — the doctrine's
 # exit product is a cleared instrumental, pitch-shifted source vocals are
 # audible-weird, and Gateway 05 replaces them anyway.
-MORPH_STEMS = ["drums", "bass", "other"]
+MORPH_STEMS = ["drums", "bass", "other", "guitar", "piano"]
 
 # Phase-vocoder artifact ceiling: stretching beyond this range sounds broken.
 TEMPO_RATE_MIN = 0.80
@@ -348,7 +348,7 @@ def run_morph_pipeline(stems_dir, morph_dir, params: dict, progress_cb=None) -> 
         # Key detection on the harmonic stems (bass+other): drums' broadband
         # transients pollute the full-mix chroma. Falls back to the full mix
         # when no harmonic stems exist.
-        harm_names = [n for n in ["bass", "other"] if n in source_stems]
+        harm_names = [n for n in ["bass", "other", "guitar", "piano"] if n in source_stems]
         y_h_orig, sr_h = _sum_stems_mono(stems_dir, harm_names)
         if y_h_orig is not None:
             key_idx_orig = int(np.argmax(librosa.feature.chroma_cqt(y=y_h_orig, sr=sr_h).mean(axis=1)))
