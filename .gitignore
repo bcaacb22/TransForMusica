@@ -95,3 +95,17 @@ uploads/
 .ruff_cache/
 
 backend/mongo.log
+dist/
+build/
+installer_output/
+installer_support/
+*.spec
+backend/launcher.py
+installer.iss
+dist/
+build/
+installer_output/
+installer_support/
+*.spec
+backend/launcher.py
+installer.iss
