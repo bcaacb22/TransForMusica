@@ -900,31 +900,31 @@ async def legal_scan(project_id: str):
         raise HTTPException(status_code=404, detail="Audio file not found on disk")
 
     try:
-        # Shazam v2 recognition — full file, async submit + poll
-        match_title = match_artist = match_album = match_label = None
-        match_release_date = match_timecode = match_isrc = match_genre = None
-        match_spotify_url = match_apple_music_url = match_album_art = match_song_link = None
+        # Run BOTH recognition engines — results shown side by side in the report.
         scan_error = None
-        matched_by = None
+        shazam_result = None
+        acoustid_result = None
 
         if SHAZAM_API_KEY:
             try:
                 rec = await _shazam_recognize(file_path)
                 if rec["status"] == "success" and rec["results"]:
                     r = rec["results"][0]
-                    match_title = r.get("title")
-                    match_artist = r.get("artist")
-                    match_album = r.get("album")
-                    match_release_date = r.get("releaseDate")
-                    match_timecode = r.get("timecode")
-                    match_isrc = r.get("isrc")
-                    match_genre = r.get("genre")
-                    match_album_art = r.get("artwork")
                     links = r.get("links") or {}
-                    match_spotify_url = links.get("spotify")
-                    match_apple_music_url = links.get("appleMusic")
-                    match_song_link = links.get("shazam")
-                    matched_by = "Shazam API v2"
+                    shazam_result = {
+                        "source": "Shazam API v2",
+                        "matchedSource": f"{r.get('title')} — {r.get('artist')}" if r.get('artist') else r.get('title'),
+                        "isrc": r.get("isrc"),
+                        "label": None,
+                        "releaseDate": r.get("releaseDate"),
+                        "genre": r.get("genre"),
+                        "album": r.get("album"),
+                        "timecode": r.get("timecode"),
+                        "spotifyUrl": links.get("spotify"),
+                        "appleMusicUrl": links.get("appleMusic"),
+                        "albumArt": r.get("artwork"),
+                        "songLink": links.get("shazam"),
+                    }
                 elif rec["status"] == "failed":
                     scan_error = f"Shazam {rec['code']}: {rec['error']}"
             except Exception as e:
@@ -932,19 +932,49 @@ async def legal_scan(project_id: str):
         else:
             scan_error = "no SHAZAM_API_KEY configured"
 
-        # AcoustID fallback — only when Shazam didn't find a match
-        if not match_title and ACOUSTID_API_KEY:
+        if ACOUSTID_API_KEY:
             try:
                 rec2 = await asyncio.to_thread(_acoustid_recognize_sync, file_path)
                 if rec2["status"] == "success" and rec2["results"]:
                     r = rec2["results"][0]
-                    match_title = r.get("title")
-                    match_artist = r.get("artist")
-                    match_isrc = r.get("isrc")
-                    matched_by = "AcoustID (Chromaprint)"
-                    scan_error = None  # clear any Shazam error — we got a match
+                    acoustid_result = {
+                        "source": "AcoustID (Chromaprint)",
+                        "matchedSource": f"{r.get('title')} — {r.get('artist')}" if r.get('artist') else r.get('title'),
+                        "isrc": r.get("isrc"),
+                        "label": None,
+                        "releaseDate": None,
+                        "genre": None,
+                        "album": None,
+                        "timecode": None,
+                        "spotifyUrl": None,
+                        "appleMusicUrl": None,
+                        "albumArt": None,
+                        "songLink": None,
+                    }
             except Exception:
-                pass  # AcoustID failure is silent — Shazam result stands
+                pass  # AcoustID failure is silent
+
+        # Primary match = whichever engine found something (Shazam preferred)
+        primary = shazam_result or acoustid_result
+        match_title = None
+        match_artist = match_album = match_label = None
+        match_release_date = match_timecode = match_isrc = match_genre = None
+        match_spotify_url = match_apple_music_url = match_album_art = match_song_link = None
+        matched_by = None
+        if primary:
+            match_title = primary["matchedSource"]
+            match_isrc = primary.get("isrc")
+            match_release_date = primary.get("releaseDate")
+            match_timecode = primary.get("timecode")
+            match_genre = primary.get("genre")
+            match_album = primary.get("album")
+            match_spotify_url = primary.get("spotifyUrl")
+            match_apple_music_url = primary.get("appleMusicUrl")
+            match_album_art = primary.get("albumArt")
+            match_song_link = primary.get("songLink")
+            matched_by = primary["source"]
+            if primary.get("matchedSource") and " — " in primary["matchedSource"]:
+                match_title, match_artist = primary["matchedSource"].split(" — ", 1)
 
         # Get duration via ffprobe
         duration = None
@@ -1030,6 +1060,8 @@ async def legal_scan(project_id: str):
             "album": match_album,
             "original_transcription": transcribed,
             "scanError": scan_error,
+            "shazamResult": shazam_result,
+            "acoustidResult": acoustid_result,
         }
 
         update_fields = {"legal_scan": result, "updated_at": datetime.now(timezone.utc).isoformat()}
