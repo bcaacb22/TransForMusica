@@ -211,9 +211,13 @@ SHAZAM_BASE_URL = os.environ.get("SHAZAM_BASE_URL", "https://shazam-api.com").rs
 SHAZAM_POLL_INTERVAL_S = 2.5
 SHAZAM_POLL_TIMEOUT_S = 120.0
 
-# AcoustID (Chromaprint) — fallback recognition when Shazam finds no match
+# AcoustID (Chromaprint) — second recognition engine
 ACOUSTID_API_KEY = os.environ.get("ACOUSTID_API_KEY", "")
 FPCALC_PATH = os.environ.get("FPCALC", str(ROOT_DIR / "fpcalc.exe"))
+
+# AudioTag.info — third recognition engine
+AUDIOTAG_API_KEY = os.environ.get("AUDIOTAG_API_KEY", "")
+AUDIOTAG_URL = "https://audiotag.info/api"
 
 # Default Ollama config (can be overridden per-request or via env)
 DEFAULT_LLM_BASE_URL = os.environ.get('LLM_BASE_URL', os.environ.get('OLLAMA_BASE_URL', 'http://localhost:1234'))
@@ -885,6 +889,58 @@ def _acoustid_recognize_sync(file_path: Path) -> dict:
     }], "code": None, "error": None}
 
 
+def _audiotag_recognize_sync(file_path: Path) -> dict:
+    """Submit audio to AudioTag.info identify + poll get_result.
+    Returns the same shape as _shazam_recognize."""
+    import requests as _rq
+    import time as _t
+
+    with open(file_path, "rb") as f:
+        resp = _rq.post(AUDIOTAG_URL,
+                        data={"apikey": AUDIOTAG_API_KEY, "action": "identify"},
+                        files={"file": (file_path.name, f, "audio/wav")},
+                        timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("success"):
+        return {"status": "failed", "results": [], "code": "API_ERROR",
+                "error": data.get("error", str(data))}
+    token = data.get("token")
+    if not token:
+        return {"status": "failed", "results": [], "code": "NO_TOKEN",
+                "error": "No token returned"}
+
+    # Poll for result (tokens valid 5 min; results usually ready in <15s)
+    deadline = _t.monotonic() + 90
+    while _t.monotonic() < deadline:
+        _t.sleep(3)
+        r = _rq.post(AUDIOTAG_URL,
+                     data={"apikey": AUDIOTAG_API_KEY, "action": "get_result", "token": token},
+                     timeout=30)
+        r.raise_for_status()
+        rd = r.json()
+        result = rd.get("result")
+        if result == "wait":
+            continue
+        if result == "found":
+            d = rd.get("data", {})
+            return {"status": "success", "results": [{
+                "title": d.get("title"),
+                "artist": d.get("artist"),
+                "album": d.get("album"),
+                "releaseDate": None,
+                "timecode": None,
+                "isrc": None,
+                "genre": None,
+                "artwork": None,
+                "links": {},
+            }], "code": None, "error": None}
+        # "not found"
+        return {"status": "no_matches", "results": [], "code": None, "error": None}
+    return {"status": "failed", "results": [], "code": "TIMEOUT",
+            "error": "AudioTag result not ready after 90s"}
+
+
 @api_router.post("/projects/{project_id}/legal-scan")
 async def legal_scan(project_id: str):
     project = await db.projects.find_one({"id": project_id})
@@ -904,8 +960,10 @@ async def legal_scan(project_id: str):
         scan_error = None
         shazam_result = None
         acoustid_result = None
+        audiotag_result = None
         shazam_ran_clean = False
         acoustid_ran_clean = False
+        audiotag_ran_clean = False
 
         if SHAZAM_API_KEY:
             try:
@@ -963,8 +1021,33 @@ async def legal_scan(project_id: str):
             except Exception:
                 pass  # AcoustID failure is silent
 
+        if AUDIOTAG_API_KEY:
+            try:
+                rec3 = await asyncio.to_thread(_audiotag_recognize_sync, file_path)
+                if rec3["status"] == "success" and rec3["results"]:
+                    r = rec3["results"][0]
+                    audiotag_result = {
+                        "source": "AudioTag.info",
+                        "matchedSource": f"{r.get('title')} — {r.get('artist')}" if r.get('artist') else r.get('title'),
+                        "isrc": r.get("isrc"),
+                        "label": None,
+                        "releaseDate": None,
+                        "genre": None,
+                        "album": r.get("album"),
+                        "timecode": None,
+                        "spotifyUrl": None,
+                        "appleMusicUrl": None,
+                        "albumArt": None,
+                        "songLink": None,
+                    }
+                    audiotag_ran_clean = True
+                elif rec3["status"] == "no_matches":
+                    audiotag_ran_clean = True
+            except Exception:
+                pass  # AudioTag failure is silent
+
         # Primary match = whichever engine found something (Shazam preferred)
-        primary = shazam_result or acoustid_result
+        primary = shazam_result or acoustid_result or audiotag_result
         match_title = None
         match_artist = match_album = match_label = None
         match_release_date = match_timecode = match_isrc = match_genre = None
@@ -1037,8 +1120,8 @@ async def legal_scan(project_id: str):
         # If at least one engine ran and returned a clean "no match", that's
         # a definitive NONE — not "LOOKUP UNAVAILABLE". UNKNOWN only when
         # every engine errored out.
-        any_engine_ran_clean = shazam_ran_clean or acoustid_ran_clean
-        if not SHAZAM_API_KEY and not ACOUSTID_API_KEY:
+        any_engine_ran_clean = shazam_ran_clean or acoustid_ran_clean or audiotag_ran_clean
+        if not SHAZAM_API_KEY and not ACOUSTID_API_KEY and not AUDIOTAG_API_KEY:
             violation_risk = "UNAVAILABLE"
             matched_source = "SCAN UNAVAILABLE — no recognition API key configured"
         elif match_title:
@@ -1078,6 +1161,7 @@ async def legal_scan(project_id: str):
             "scanError": scan_error,
             "shazamResult": shazam_result,
             "acoustidResult": acoustid_result,
+            "audiotagResult": audiotag_result,
         }
 
         update_fields = {"legal_scan": result, "updated_at": datetime.now(timezone.utc).isoformat()}

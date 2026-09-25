@@ -187,6 +187,7 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
     const fname = project?.original_file || project?.name || 'UNKNOWN'
     const shazam = d.shazamResult
     const acoustid = d.acoustidResult
+    const audiotag = d.audiotagResult
     const report = [
       '╔══════════════════════════════════════════════════════╗',
       '║         TRANSFORMUSIC — LEGAL DIAGNOSTIC REPORT      ║',
@@ -201,6 +202,9 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
       '────────────────────────────────────────────────────────',
       ...engineSection(acoustid),
       '',
+      '────────────────────────────────────────────────────────',
+      ...engineSection(audiotag),
+      '',
       '── AUDIO ANALYSIS ──────────────────────────────────────',
       `BPM                : ${d.bpm || '—'}`,
       `KEY                : ${d.key || '—'}`,
@@ -214,7 +218,7 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
         : 'CLEAR TO PROCEED. No registered match found in database.',
       '',
       '────────────────────────────────────────────────────────',
-      'Powered by Shazam API v2 and AcoustID (Chromaprint) audio recognition.',
+      'Powered by Shazam API v2, AcoustID (Chromaprint), and AudioTag.info audio recognition.',
       'This report is generated for informational purposes only.',
       'It does not constitute legal advice.',
     ].filter(Boolean).join('\n')
@@ -229,6 +233,7 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
     const fname = project?.original_file || project?.name || 'UNKNOWN'
     const shazam = d.shazamResult
     const acoustid = d.acoustidResult
+    const audiotag = d.audiotagResult
     const riskColor = d.violationRisk === 'HIGH' ? '#ff3b3b' : d.violationRisk === 'MODERATE' ? '#ffaa00' : '#00ff88'
     const row = (label, value) => `<tr><td class="lbl">${label}</td><td class="val">${value || '—'}</td></tr>`
     const engineTable = (eng) => {
@@ -284,6 +289,7 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
 <div class="section"><h2>IDENTIFICATION</h2>
   ${engineTable(shazam)}
   ${engineTable(acoustid)}
+  ${engineTable(audiotag)}
 </div>
 <div class="section analysis"><h2>AUDIO ANALYSIS</h2>
   <table>
@@ -300,7 +306,7 @@ export default function Gateway01Legal({ projectId, project, onComplete }) {
     : 'CLEAR TO PROCEED. No registered match found in database.'}</p>
 </div>
 <div class="footer">
-  Powered by Shazam API v2 and AcoustID (Chromaprint) audio recognition.<br>
+  Powered by Shazam API v2, AcoustID (Chromaprint), and AudioTag.info audio recognition.<br>
   This report is generated for informational purposes only. It does not constitute legal advice.
 </div>
 <script>window.onload = () => { setTimeout(() => window.print(), 300) }</script>
