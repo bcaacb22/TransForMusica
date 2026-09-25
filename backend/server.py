@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import sys
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -795,7 +796,7 @@ async def upload_file(project_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=404, detail="Project not found")
     
     # Validate file type
-    allowed_types = ['audio/mpeg', 'audio/wav', 'audio/mp3', 'audio/x-wav']
+    allowed_types = ['audio/mpeg', 'audio/wav', 'audio/mp3', 'audio/x-wav', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/ogg', 'audio/flac', 'audio/x-flac', 'audio/webm']
     if file.content_type not in allowed_types:
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload audio files only.")
     
@@ -2315,7 +2316,10 @@ app.include_router(api_router)
 
 # Serve the pre-built frontend (frontend/dist/) when present — enables the
 # standalone .exe mode where no Node/Vite dev server is needed.
-_FRONTEND_DIST = ROOT_DIR.parent / "frontend" / "dist"
+if getattr(sys, 'frozen', False):
+    _FRONTEND_DIST = Path(sys._MEIPASS) / "frontend" / "dist"
+else:
+    _FRONTEND_DIST = ROOT_DIR.parent / "frontend" / "dist"
 if _FRONTEND_DIST.is_dir():
     from fastapi.staticfiles import StaticFiles
     from starlette.responses import FileResponse as _FR
@@ -2348,21 +2352,24 @@ logger = logging.getLogger(__name__)
 @app.on_event("startup")
 async def startup_reset_stale_jobs():
     """Any job still 'processing' at startup was orphaned by a crash/restart — reset it."""
-    r1 = await db.projects.update_many(
-        {"transform_status": "processing"},
-        {"$set": {"transform_status": "pending", "transform_error": None}},
-    )
-    r2 = await db.projects.update_many(
-        {"voice_clone_status": "processing"},
-        {"$set": {"voice_clone_status": "pending", "voice_clone_error": None}},
-    )
-    r3 = await db.projects.update_many(
-        {"morph_status": "processing"},
-        {"$set": {"morph_status": "pending", "morph_error": None}},
-    )
-    total = r1.modified_count + r2.modified_count + r3.modified_count
-    if total:
-        logger.info(f"Reset {total} orphaned job(s) to 'pending' on startup")
+    try:
+        r1 = await db.projects.update_many(
+            {"transform_status": "processing"},
+            {"$set": {"transform_status": "pending", "transform_error": None}},
+        )
+        r2 = await db.projects.update_many(
+            {"voice_clone_status": "processing"},
+            {"$set": {"voice_clone_status": "pending", "voice_clone_error": None}},
+        )
+        r3 = await db.projects.update_many(
+            {"morph_status": "processing"},
+            {"$set": {"morph_status": "pending", "morph_error": None}},
+        )
+        total = r1.modified_count + r2.modified_count + r3.modified_count
+        if total:
+            logger.info(f"Reset {total} orphaned job(s) to 'pending' on startup")
+    except Exception as e:
+        logger.warning(f"Startup job reset skipped (MongoDB may not be running): {e}")
 
 
 @app.on_event("shutdown")
